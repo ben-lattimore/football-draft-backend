@@ -49,11 +49,21 @@ UserSchema.methods.comparePassword = async function(candidatePassword) {
 
 const User = mongoose.model('User', UserSchema);
 
+// Player Model (assuming you have this)
+const PlayerSchema = new mongoose.Schema({
+    name: String,
+    position: String,
+    club: String,
+    player_image: String
+});
+
+const Player = mongoose.model('Player', PlayerSchema);
+
 // Auth Routes
 app.post('/api/auth/register', async (req, res) => {
     try {
-        const { username, password } = req.body;
-        const user = new User({ username, password });
+        const { username, password, isAdmin } = req.body;
+        const user = new User({ username, password, isAdmin: isAdmin || false });
         await user.save();
         res.status(201).json({ message: 'User registered successfully' });
     } catch (error) {
@@ -85,46 +95,81 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// Player routes (assuming you have these)
-const playerRoutes = require('./routes/players');
-app.use('/api/players', playerRoutes);
+// Player routes
+app.get('/api/players', async (req, res) => {
+    try {
+        const players = await Player.find();
+        res.json(players);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching players', error: error.message });
+    }
+});
 
 // Auction state
 let currentPlayer = null;
 let currentBid = null;
 let auctionActive = false;
 
-// Socket.IO
-io.on('connection', (socket) => {
+// Socket.IO with authentication
+io.use((socket, next) => {
+    const token = socket.handshake.auth.token;
+    if (!token) {
+        return next(new Error('Authentication error'));
+    }
+    jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+        if (err) return next(new Error('Authentication error'));
+        socket.userId = decoded.userId;
+        next();
+    });
+});
+
+io.on('connection', async (socket) => {
     console.log('New client connected');
 
-    // Send current auction state to newly connected client
-    socket.emit('auctionState', { currentPlayer, currentBid, auctionActive });
+    try {
+        const user = await User.findById(socket.userId);
+        socket.isAdmin = user.isAdmin;
 
-    socket.on('startAuction', (player) => {
-        // In a real application, you would verify that the user is an admin here
-        currentPlayer = player;
-        currentBid = null;
-        auctionActive = true;
-        io.emit('auctionStarted', { player, currentBid });
-    });
+        // Send current auction state to newly connected client
+        socket.emit('auctionState', { currentPlayer, currentBid, auctionActive });
 
-    socket.on('stopAuction', () => {
-        // In a real application, you would verify that the user is an admin here
-        auctionActive = false;
-        io.emit('auctionStopped', { winner: currentBid ? currentBid.bidder : null, amount: currentBid ? currentBid.amount : null });
-    });
+        socket.on('startAuction', (player) => {
+            if (!socket.isAdmin) {
+                return socket.emit('error', { message: 'Unauthorized' });
+            }
+            currentPlayer = player;
+            currentBid = null;
+            auctionActive = true;
+            io.emit('auctionStarted', { player, currentBid });
+            console.log('Auction started for player:', player.name);
+        });
 
-    socket.on('placeBid', (bid) => {
-        if (auctionActive && (!currentBid || bid.amount > currentBid.amount)) {
-            currentBid = bid;
-            io.emit('newBid', bid);
-        }
-    });
+        socket.on('stopAuction', () => {
+            if (!socket.isAdmin) {
+                return socket.emit('error', { message: 'Unauthorized' });
+            }
+            auctionActive = false;
+            io.emit('auctionStopped', { winner: currentBid ? currentBid.bidder : null, amount: currentBid ? currentBid.amount : null });
+            console.log('Auction stopped. Winner:', currentBid ? currentBid.bidder : 'No winner');
+            currentPlayer = null;
+            currentBid = null;
+        });
 
-    socket.on('disconnect', () => {
-        console.log('Client disconnected');
-    });
+        socket.on('placeBid', (bid) => {
+            if (auctionActive && (!currentBid || bid.amount > currentBid.amount)) {
+                currentBid = bid;
+                io.emit('newBid', bid);
+                console.log('New bid placed:', bid);
+            }
+        });
+
+        socket.on('disconnect', () => {
+            console.log('Client disconnected');
+        });
+    } catch (error) {
+        console.error('Error in socket connection:', error);
+        socket.disconnect(true);
+    }
 });
 
 // Start the server
