@@ -1,26 +1,42 @@
 const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
+const mongoose = require('mongoose');
+const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
+
+// CORS configuration
+const corsOptions = {
+    origin: process.env.FRONTEND_URL || 'http://localhost:3001',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
+};
+
+app.use(cors(corsOptions));
+
 const io = new Server(server, {
-    cors: {
-        origin: process.env.FRONTEND_URL,
-        methods: ["GET", "POST"]
-    }
+    cors: corsOptions,
+    transports: ['websocket', 'polling'],
+    pingTimeout: 60000,
+    pingInterval: 25000
 });
 
 const PORT = process.env.PORT || 5001;
 
 // Middleware
-app.use(cors());
 app.use(express.json());
+
+// Add this middleware to log incoming requests
+app.use((req, res, next) => {
+    console.log(`${req.method} request for ${req.url}`);
+    next();
+});
 
 // MongoDB connection
 mongoose.connect(process.env.MONGODB_URI, {
@@ -49,7 +65,7 @@ UserSchema.methods.comparePassword = async function(candidatePassword) {
 
 const User = mongoose.model('User', UserSchema);
 
-// Player Model (assuming you have this)
+// Player Model
 const PlayerSchema = new mongoose.Schema({
     name: String,
     position: String,
@@ -114,21 +130,28 @@ let auctionActive = false;
 io.use((socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) {
-        return next(new Error('Authentication error'));
+        return next(new Error('Authentication error: No token provided'));
     }
     jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-        if (err) return next(new Error('Authentication error'));
+        if (err) {
+            console.error('JWT verification error:', err);
+            return next(new Error('Authentication error: Invalid token'));
+        }
         socket.userId = decoded.userId;
         next();
     });
 });
 
 io.on('connection', async (socket) => {
-    console.log('New client connected');
+    console.log('New client connected, ID:', socket.id);
 
     try {
         const user = await User.findById(socket.userId);
+        if (!user) {
+            throw new Error('User not found');
+        }
         socket.isAdmin = user.isAdmin;
+        console.log(`User connected: ${user.username}, Admin: ${user.isAdmin}`);
 
         // Send current auction state to newly connected client
         socket.emit('auctionState', { currentPlayer, currentBid, auctionActive });
@@ -163,11 +186,12 @@ io.on('connection', async (socket) => {
             }
         });
 
-        socket.on('disconnect', () => {
-            console.log('Client disconnected');
+        socket.on('disconnect', (reason) => {
+            console.log(`Client disconnected. ID: ${socket.id}, Reason: ${reason}`);
         });
     } catch (error) {
         console.error('Error in socket connection:', error);
+        socket.emit('error', { message: 'An error occurred during connection setup' });
         socket.disconnect(true);
     }
 });
