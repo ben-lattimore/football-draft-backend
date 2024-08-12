@@ -129,6 +129,22 @@ app.get('/api/players', async (req, res) => {
     }
 });
 
+app.get('/api/teams', async (req, res) => {
+    try {
+        const teams = await User.find({})
+            .select('-password')  // Exclude password field
+            .populate({
+                path: 'wonPlayers.player',
+                model: 'Player',
+                select: 'name position club player_image'  // Select the fields you want to include
+            });
+        res.json(teams);
+    } catch (error) {
+        console.error('Error fetching teams:', error);
+        res.status(500).json({ message: 'Error fetching teams', error: error.message });
+    }
+});
+
 // Auction state
 let currentPlayer = null;
 let currentBid = null;
