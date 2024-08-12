@@ -32,7 +32,7 @@ const PORT = process.env.PORT || 5001;
 // Middleware
 app.use(express.json());
 
-// Add this middleware to log incoming requests
+// Logging middleware
 app.use((req, res, next) => {
     console.log(`${req.method} request for ${req.url}`);
     next();
@@ -44,7 +44,7 @@ mongoose.connect(process.env.MONGODB_URI, {
     useUnifiedTopology: true,
 })
     .then(() => {
-        console.log('Connected to MongoDB');
+        console.log('Connected to MongoDB Atlas:', process.env.MONGODB_URI);
         loadPlayers();
     })
     .catch((err) => console.error('Could not connect to MongoDB', err));
@@ -53,7 +53,12 @@ mongoose.connect(process.env.MONGODB_URI, {
 const UserSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true },
     password: { type: String, required: true },
-    isAdmin: { type: Boolean, default: false }
+    isAdmin: { type: Boolean, default: false },
+    wonPlayers: [{
+        player: { type: mongoose.Schema.Types.ObjectId, ref: 'Player' },
+        amount: { type: Number, required: true },
+        auctionDate: { type: Date, default: Date.now }
+    }]
 });
 
 UserSchema.pre('save', async function(next) {
@@ -199,15 +204,63 @@ io.on('connection', async (socket) => {
             console.log('Auction started for player:', currentPlayer.name);
         });
 
-        socket.on('stopAuction', () => {
+        socket.on('stopAuction', async () => {
             console.log('Received stopAuction event');
             if (!socket.isAdmin) {
                 console.log('Unauthorized attempt to stop auction');
                 return socket.emit('error', { message: 'Unauthorized' });
             }
             auctionActive = false;
-            io.emit('auctionStopped', { winner: currentBid ? currentBid.bidder : null, amount: currentBid ? currentBid.amount : null });
-            console.log('Auction stopped. Winner:', currentBid ? currentBid.bidder : 'No winner');
+            if (currentBid && currentPlayer) {
+                try {
+                    console.log('Current player:', currentPlayer);
+                    console.log('Attempting to update user in database:', {
+                        username: currentBid.bidder,
+                        playerId: currentPlayer._id,
+                        amount: currentBid.amount
+                    });
+                    const session = await mongoose.startSession();
+                    session.startTransaction();
+                    try {
+                        const winner = await User.findOneAndUpdate(
+                            { username: currentBid.bidder },
+                            {
+                                $push: {
+                                    wonPlayers: {
+                                        player: currentPlayer._id,
+                                        amount: currentBid.amount,
+                                        auctionDate: new Date()
+                                    }
+                                }
+                            },
+                            { new: true, session }
+                        );
+                        if (!winner) {
+                            console.log('Winner not found in database');
+                            throw new Error('Winner not found');
+                        }
+                        await session.commitTransaction();
+                        console.log('Database update successful. Updated user:', winner);
+                        io.emit('auctionStopped', {
+                            winner: currentBid.bidder,
+                            amount: currentBid.amount,
+                            player: currentPlayer.name
+                        });
+                        console.log(`Auction stopped. Winner: ${currentBid.bidder}, Player: ${currentPlayer.name}, Amount: ${currentBid.amount}`);
+                    } catch (error) {
+                        await session.abortTransaction();
+                        throw error;
+                    } finally {
+                        session.endSession();
+                    }
+                } catch (error) {
+                    console.error('Error saving won player:', error);
+                    socket.emit('error', { message: 'Error saving auction result' });
+                }
+            } else {
+                io.emit('auctionStopped', { winner: null, amount: null, player: null });
+                console.log('Auction stopped. No winner.');
+            }
             currentPlayer = null;
             currentBid = null;
         });
