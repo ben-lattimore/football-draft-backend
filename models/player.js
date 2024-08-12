@@ -5,21 +5,16 @@ const playerSchema = new mongoose.Schema({
         type: String,
         required: true
     },
-    position_id: {
-        type: Number
-    },
     position: {
-        type: String
+        type: String,
+        required: true
     },
     player_image: {
         type: String
     },
-    club: {
-        type: String
-    },
-    club_logo: {
+    country: {
         type: String
     }
-}, { strict: false });  // This allows for additional fields in your JSON that aren't defined in the schema
+});
 
 module.exports = mongoose.model('Player', playerSchema);

@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const Player = require('./models/player');
-const playersData = require('./players_2.json');
+const playersData = require('./players.json');  // Make sure this points to your new JSON file
 require('dotenv').config();
 
 mongoose.connect(process.env.MONGODB_URI, {
@@ -10,24 +10,19 @@ mongoose.connect(process.env.MONGODB_URI, {
     .then(() => console.log('Connected to MongoDB'))
     .catch((err) => console.error('Could not connect to MongoDB', err));
 
-const positionMapping = {
-    24: 'goalkeeper',
-    25: 'defender',
-    26: 'midfielder',
-    27: 'attacker'
-};
-
 const importData = async () => {
     try {
         await Player.deleteMany();
         console.log('Existing data deleted');
 
-        const playersWithPosition = playersData.map(player => ({
-            ...player,
-            position: positionMapping[player.position_id] || 'unknown'
+        const formattedPlayers = playersData.map(player => ({
+            name: player.name,
+            position: player.position.toLowerCase(),  // Lowercase for consistency
+            player_image: player.imageUrl,
+            country: player.country
         }));
 
-        const insertResult = await Player.insertMany(playersWithPosition);
+        const insertResult = await Player.insertMany(formattedPlayers);
         console.log(`${insertResult.length} players imported successfully`);
 
         // Log a few samples to verify data
