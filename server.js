@@ -54,6 +54,7 @@ const UserSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true },
     password: { type: String, required: true },
     isAdmin: { type: Boolean, default: false },
+    initialBudget: { type: Number, default: 100 },
     wonPlayers: [{
         player: { type: mongoose.Schema.Types.ObjectId, ref: 'Player' },
         amount: { type: Number, required: true },
@@ -62,8 +63,9 @@ const UserSchema = new mongoose.Schema({
 });
 
 UserSchema.pre('save', async function(next) {
-    if (!this.isModified('password')) return next();
-    this.password = await bcrypt.hash(this.password, 10);
+    if (this.isModified('password')) {
+        this.password = await bcrypt.hash(this.password, 10);
+    }
     next();
 });
 
@@ -132,16 +134,63 @@ app.get('/api/players', async (req, res) => {
 app.get('/api/teams', async (req, res) => {
     try {
         const teams = await User.find({})
-            .select('-password')  // Exclude password field
+            .select('-password')
             .populate({
                 path: 'wonPlayers.player',
                 model: 'Player',
-                select: 'name position club player_image'  // Select the fields you want to include
+                select: 'name position club player_image'
             });
         res.json(teams);
     } catch (error) {
         console.error('Error fetching teams:', error);
         res.status(500).json({ message: 'Error fetching teams', error: error.message });
+    }
+});
+
+app.get('/api/user/budget', async (req, res) => {
+    console.log('Received request for user budget');
+    try {
+        const token = req.headers.authorization?.split(' ')[1];
+        if (!token) {
+            console.log('No token provided in budget request');
+            return res.status(401).json({ message: 'No token provided' });
+        }
+
+        let decoded;
+        try {
+            decoded = jwt.verify(token, process.env.JWT_SECRET);
+            console.log('Decoded token:', decoded);
+        } catch (err) {
+            console.error('Token verification failed:', err);
+            return res.status(401).json({ message: 'Invalid token' });
+        }
+
+        if (!decoded.userId) {
+            console.error('Decoded token does not contain userId');
+            return res.status(400).json({ message: 'Invalid token structure' });
+        }
+
+        console.log('Attempting to find user with ID:', decoded.userId);
+        const user = await User.findById(decoded.userId);
+
+        if (!user) {
+            console.log('User not found in database');
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const totalSpent = user.wonPlayers.reduce((total, player) => total + player.amount, 0);
+        const calculatedBudget = Math.max(user.initialBudget - totalSpent, 0);
+
+        console.log('User details:', user.toObject());
+        console.log('Calculated Budget:', calculatedBudget);
+        console.log('Budget type:', typeof calculatedBudget);
+
+        const response = { budget: calculatedBudget };
+        console.log('Sending budget response:', response);
+        res.json(response);
+    } catch (error) {
+        console.error('Error fetching user budget:', error);
+        res.status(500).json({ message: 'Error fetching user budget', error: error.message });
     }
 });
 
@@ -169,7 +218,7 @@ const loadPlayers = async () => {
         console.log(`Loaded ${players.length} players`);
     } catch (error) {
         console.error('Error loading players:', error);
-        players = []; // Ensure players is an empty array if there's an error
+        players = [];
     }
 };
 
@@ -230,40 +279,40 @@ io.on('connection', async (socket) => {
             if (currentBid && currentPlayer) {
                 try {
                     console.log('Current player:', currentPlayer);
-                    console.log('Attempting to update user in database:', {
-                        username: currentBid.bidder,
-                        playerId: currentPlayer._id,
-                        amount: currentBid.amount
-                    });
+                    console.log('Current bid:', currentBid);
                     const session = await mongoose.startSession();
                     session.startTransaction();
                     try {
-                        const winner = await User.findOneAndUpdate(
-                            { username: currentBid.bidder },
-                            {
-                                $push: {
-                                    wonPlayers: {
-                                        player: currentPlayer._id,
-                                        amount: currentBid.amount,
-                                        auctionDate: new Date()
-                                    }
-                                }
-                            },
-                            { new: true, session }
-                        );
+                        const winner = await User.findOne({ username: currentBid.bidder }).session(session);
+
                         if (!winner) {
                             console.log('Winner not found in database');
                             throw new Error('Winner not found');
                         }
+
+                        winner.wonPlayers.push({
+                            player: currentPlayer._id,
+                            amount: currentBid.amount,
+                            auctionDate: new Date()
+                        });
+
+                        await winner.save();
+
+                        const totalSpent = winner.wonPlayers.reduce((total, player) => total + player.amount, 0);
+                        const newBudget = Math.max(winner.initialBudget - totalSpent, 0);
+
                         await session.commitTransaction();
-                        console.log('Database update successful. Updated user:', winner);
+                        console.log('Database update successful. Updated user:', JSON.stringify(winner.toObject(), null, 2));
+                        console.log('New calculated budget:', newBudget);
                         io.emit('auctionStopped', {
                             winner: currentBid.bidder,
                             amount: currentBid.amount,
-                            player: currentPlayer.name
+                            player: currentPlayer.name,
+                            newBudget: newBudget
                         });
-                        console.log(`Auction stopped. Winner: ${currentBid.bidder}, Player: ${currentPlayer.name}, Amount: ${currentBid.amount}`);
+                        console.log(`Auction stopped. Winner: ${currentBid.bidder}, Player: ${currentPlayer.name}, Amount: ${currentBid.amount}, New Budget: ${newBudget}`);
                     } catch (error) {
+                        console.error('Error in transaction, aborting:', error);
                         await session.abortTransaction();
                         throw error;
                     } finally {
@@ -271,29 +320,49 @@ io.on('connection', async (socket) => {
                     }
                 } catch (error) {
                     console.error('Error saving won player:', error);
-                    socket.emit('error', { message: 'Error saving auction result' });
+                    socket.emit('error', { message: 'Error saving auction result: ' + error.message });
                 }
             } else {
+                console.log('Auction stopped with no winner. Current bid:', currentBid, 'Current player:', currentPlayer);
                 io.emit('auctionStopped', { winner: null, amount: null, player: null });
-                console.log('Auction stopped. No winner.');
             }
             currentPlayer = null;
             currentBid = null;
         });
 
-        socket.on('placeBid', (bid) => {
+        socket.on('placeBid', async (bid) => {
             console.log('Received placeBid event', bid);
             if (!auctionActive) {
                 console.log('Attempt to place bid when auction is not active');
                 return socket.emit('error', { message: 'Auction is not active' });
             }
-            if (!currentBid || bid.amount > currentBid.amount) {
-                currentBid = bid;
-                console.log('New bid accepted:', bid);
-                io.emit('newBid', bid);
-            } else {
-                console.log('Bid rejected: not higher than current bid');
-                socket.emit('error', { message: 'Your bid must be higher than the current bid' });
+
+            try {
+                const user = await User.findOne({ username: bid.bidder });
+                console.log('User found for bid:', user ? user.username : 'Not found');
+                if (!user) {
+                    return socket.emit('error', { message: 'User not found' });
+                }
+
+                const totalSpent = user.wonPlayers.reduce((total, player) => total + player.amount, 0);
+                const currentBudget = Math.max(user.initialBudget - totalSpent, 0);
+
+                console.log('User budget:', currentBudget, 'Bid amount:', bid.amount);
+                if (bid.amount > currentBudget) {
+                    return socket.emit('error', { message: 'Bid exceeds your available budget' });
+                }
+
+                if (!currentBid || bid.amount > currentBid.amount) {
+                    currentBid = bid;
+                    console.log('New bid accepted:', bid);
+                    io.emit('newBid', bid);
+                } else {
+                    console.log('Bid rejected: not higher than current bid');
+                    socket.emit('error', { message: 'Your bid must be higher than the current bid' });
+                }
+            } catch (error) {
+                console.error('Error processing bid:', error);
+                socket.emit('error', { message: 'An error occurred while processing your bid' });
             }
         });
 
