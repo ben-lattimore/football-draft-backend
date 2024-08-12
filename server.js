@@ -43,7 +43,10 @@ mongoose.connect(process.env.MONGODB_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
 })
-    .then(() => console.log('Connected to MongoDB'))
+    .then(() => {
+        console.log('Connected to MongoDB');
+        loadPlayers();
+    })
     .catch((err) => console.error('Could not connect to MongoDB', err));
 
 // User Model
@@ -125,6 +128,29 @@ app.get('/api/players', async (req, res) => {
 let currentPlayer = null;
 let currentBid = null;
 let auctionActive = false;
+let players = [];
+let currentPlayerIndex = -1;
+
+// Function to get the next player
+const getNextPlayer = () => {
+    if (players.length === 0) {
+        console.log('No players available');
+        return null;
+    }
+    currentPlayerIndex = (currentPlayerIndex + 1) % players.length;
+    return players[currentPlayerIndex];
+};
+
+// Load players from the database
+const loadPlayers = async () => {
+    try {
+        players = await Player.find().sort({ name: 1 });
+        console.log(`Loaded ${players.length} players`);
+    } catch (error) {
+        console.error('Error loading players:', error);
+        players = []; // Ensure players is an empty array if there's an error
+    }
+};
 
 // Socket.IO with authentication
 io.use((socket, next) => {
@@ -156,19 +182,27 @@ io.on('connection', async (socket) => {
         // Send current auction state to newly connected client
         socket.emit('auctionState', { currentPlayer, currentBid, auctionActive });
 
-        socket.on('startAuction', (player) => {
+        socket.on('startAuction', () => {
+            console.log('Received startAuction event');
             if (!socket.isAdmin) {
+                console.log('Unauthorized attempt to start auction');
                 return socket.emit('error', { message: 'Unauthorized' });
             }
-            currentPlayer = player;
+            currentPlayer = getNextPlayer();
+            if (!currentPlayer) {
+                console.log('No players available for auction');
+                return socket.emit('error', { message: 'No players available for auction' });
+            }
             currentBid = null;
             auctionActive = true;
-            io.emit('auctionStarted', { player, currentBid });
-            console.log('Auction started for player:', player.name);
+            io.emit('auctionStarted', { player: currentPlayer, currentBid });
+            console.log('Auction started for player:', currentPlayer.name);
         });
 
         socket.on('stopAuction', () => {
+            console.log('Received stopAuction event');
             if (!socket.isAdmin) {
+                console.log('Unauthorized attempt to stop auction');
                 return socket.emit('error', { message: 'Unauthorized' });
             }
             auctionActive = false;
@@ -179,10 +213,18 @@ io.on('connection', async (socket) => {
         });
 
         socket.on('placeBid', (bid) => {
-            if (auctionActive && (!currentBid || bid.amount > currentBid.amount)) {
+            console.log('Received placeBid event', bid);
+            if (!auctionActive) {
+                console.log('Attempt to place bid when auction is not active');
+                return socket.emit('error', { message: 'Auction is not active' });
+            }
+            if (!currentBid || bid.amount > currentBid.amount) {
                 currentBid = bid;
+                console.log('New bid accepted:', bid);
                 io.emit('newBid', bid);
-                console.log('New bid placed:', bid);
+            } else {
+                console.log('Bid rejected: not higher than current bid');
+                socket.emit('error', { message: 'Your bid must be higher than the current bid' });
             }
         });
 
