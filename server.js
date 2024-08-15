@@ -80,7 +80,8 @@ const PlayerSchema = new mongoose.Schema({
     name: String,
     position: String,
     club: String,
-    player_image: String
+    player_image: String,
+    inBin: { type: Boolean, default: false }
 });
 
 const Player = mongoose.model('Player', PlayerSchema);
@@ -121,10 +122,20 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// Player routes
+// New route to get players in the bin
+app.get('/api/players/bin', async (req, res) => {
+    try {
+        const binPlayers = await Player.find({ inBin: true });
+        res.json(binPlayers);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching bin players', error: error.message });
+    }
+});
+
+// Update the existing players route to exclude bin players
 app.get('/api/players', async (req, res) => {
     try {
-        const players = await Player.find();
+        const players = await Player.find({ inBin: false });
         res.json(players);
     } catch (error) {
         res.status(500).json({ message: 'Error fetching players', error: error.message });
@@ -331,12 +342,18 @@ io.on('connection', async (socket) => {
                     socket.emit('error', { message: 'Error saving auction result: ' + error.message });
                 }
             } else {
-                console.log('Auction stopped with no winner. Current bid:', currentBid, 'Current player:', currentPlayer);
-                io.emit('auctionStopped', { winner: null, amount: null, player: null, allBids: allBids });
+                console.log('Auction stopped with no winner. Moving player to bin.');
+                try {
+                    await Player.findByIdAndUpdate(currentPlayer._id, { inBin: true });
+                    io.emit('auctionStopped', { winner: null, amount: null, player: currentPlayer.name, allBids: allBids, movedToBin: true });
+                } catch (error) {
+                    console.error('Error moving player to bin:', error);
+                    socket.emit('error', { message: 'Error updating player status: ' + error.message });
+                }
             }
             currentPlayer = null;
             currentBid = null;
-            allBids = []; // Reset all bids after the auction ends
+            allBids = [];
         });
 
         socket.on('placeBid', async (bid) => {
