@@ -200,6 +200,7 @@ let currentBid = null;
 let auctionActive = false;
 let players = [];
 let currentPlayerIndex = -1;
+let allBids = []; // New array to store all bids for the current auction
 
 // Function to get the next player
 const getNextPlayer = () => {
@@ -255,7 +256,7 @@ io.on('connection', async (socket) => {
         console.log(`User connected: ${user.username}, Admin: ${user.isAdmin}`);
 
         // Send current auction state to newly connected client
-        socket.emit('auctionState', { currentPlayer, currentBid, auctionActive });
+        socket.emit('auctionState', { currentPlayer, currentBid, auctionActive, allBids });
 
         socket.on('startAuction', () => {
             console.log('Received startAuction event');
@@ -270,7 +271,8 @@ io.on('connection', async (socket) => {
             }
             currentBid = null;
             auctionActive = true;
-            io.emit('auctionStarted', { player: currentPlayer, currentBid });
+            allBids = []; // Reset all bids for the new auction
+            io.emit('auctionStarted', { player: currentPlayer, currentBid, allBids });
             console.log('Auction started for player:', currentPlayer.name);
         });
 
@@ -313,7 +315,8 @@ io.on('connection', async (socket) => {
                             winner: currentBid.bidder,
                             amount: currentBid.amount,
                             player: currentPlayer.name,
-                            newBudget: newBudget
+                            newBudget: newBudget,
+                            allBids: allBids
                         });
                         console.log(`Auction stopped. Winner: ${currentBid.bidder}, Player: ${currentPlayer.name}, Amount: ${currentBid.amount}, New Budget: ${newBudget}`);
                     } catch (error) {
@@ -329,10 +332,11 @@ io.on('connection', async (socket) => {
                 }
             } else {
                 console.log('Auction stopped with no winner. Current bid:', currentBid, 'Current player:', currentPlayer);
-                io.emit('auctionStopped', { winner: null, amount: null, player: null });
+                io.emit('auctionStopped', { winner: null, amount: null, player: null, allBids: allBids });
             }
             currentPlayer = null;
             currentBid = null;
+            allBids = []; // Reset all bids after the auction ends
         });
 
         socket.on('placeBid', async (bid) => {
@@ -359,8 +363,9 @@ io.on('connection', async (socket) => {
 
                 if (!currentBid || bid.amount > currentBid.amount) {
                     currentBid = bid;
+                    allBids.push({ ...bid, timestamp: new Date() }); // Add the new bid to allBids with a timestamp
                     console.log('New bid accepted:', bid);
-                    io.emit('newBid', bid);
+                    io.emit('newBid', { currentBid: bid, allBids: allBids });
                 } else {
                     console.log('Bid rejected: not higher than current bid');
                     socket.emit('error', { message: 'Your bid must be higher than the current bid' });
