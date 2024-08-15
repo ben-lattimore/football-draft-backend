@@ -211,11 +211,16 @@ const getNextPlayer = () => {
     return players[currentPlayerIndex];
 };
 
-// Load players from the database
+// Replace the existing loadPlayers function with this:
 const loadPlayers = async () => {
     try {
-        players = await Player.find().sort({ name: 1 });
-        console.log(`Loaded ${players.length} players`);
+        players = await Player.find();
+        // Shuffle the players array
+        for (let i = players.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [players[i], players[j]] = [players[j], players[i]];
+        }
+        console.log(`Loaded and shuffled ${players.length} players`);
     } catch (error) {
         console.error('Error loading players:', error);
         players = [];
