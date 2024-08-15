@@ -9,15 +9,26 @@ require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
+// Near the top of your server.js file
+const allowedOrigins = process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(',') : [];
 
-// CORS configuration
+// Then update your corsOptions
 const corsOptions = {
-    origin: [process.env.FRONTEND_URL, 'https://football-draft-app-frontend.vercel.app'],
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) === -1) {
+            var msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+            return callback(new Error(msg), false);
+        }
+        return callback(null, true);
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true
 };
 
+// Use the corsOptions in your app configuration
 app.use(cors(corsOptions));
 
 const io = new Server(server, {
