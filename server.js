@@ -12,7 +12,7 @@ const server = http.createServer(app);
 
 // CORS configuration
 const corsOptions = {
-    origin: process.env.FRONTEND_URL || 'http://localhost:3001',
+    origin: process.env.FRONTEND_URL,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true
@@ -44,7 +44,7 @@ mongoose.connect(process.env.MONGODB_URI, {
     useUnifiedTopology: true,
 })
     .then(() => {
-        console.log('Connected to MongoDB Atlas:', process.env.MONGODB_URI);
+        console.log('Connected to MongoDB Atlas');
         loadPlayers();
     })
     .catch((err) => console.error('Could not connect to MongoDB', err));
