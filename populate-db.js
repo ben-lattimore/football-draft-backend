@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const Player = require('./models/player');
-const playersData = require('./players.json');  // Make sure this points to your new JSON file
+const playersData = require('./players.json');
 require('dotenv').config();
 
 mongoose.connect(process.env.MONGODB_URI, {
@@ -12,14 +12,14 @@ mongoose.connect(process.env.MONGODB_URI, {
 
 const importData = async () => {
     try {
-        await Player.deleteMany();
+        // Clear existing players
+        await Player.deleteMany({});
         console.log('Existing data deleted');
 
+        // Insert new players, ensuring inBin is set to false
         const formattedPlayers = playersData.map(player => ({
-            name: player.name,
-            position: player.position.toLowerCase(),  // Lowercase for consistency
-            player_image: player.imageUrl,
-            country: player.country
+            ...player,
+            inBin: false  // Explicitly set to false
         }));
 
         const insertResult = await Player.insertMany(formattedPlayers);
@@ -27,12 +27,33 @@ const importData = async () => {
 
         // Log a few samples to verify data
         const samples = await Player.find().limit(5);
-        console.log('Sample of imported data:', samples);
+        console.log('Sample of imported data:');
+        samples.forEach(player => {
+            console.log({
+                name: player.name,
+                position: player.position,
+                player_image: player.player_image,
+                country: player.country,
+                inBin: player.inBin
+            });
+        });
 
-        process.exit();
+        // Count total players
+        const totalCount = await Player.countDocuments();
+        console.log(`Total players in database: ${totalCount}`);
+
+        // Verify inBin field
+        const inBinCount = await Player.countDocuments({ inBin: true });
+        const notInBinCount = await Player.countDocuments({ inBin: false });
+        console.log(`Players with inBin true: ${inBinCount}`);
+        console.log(`Players with inBin false: ${notInBinCount}`);
+
     } catch (error) {
         console.error('Error importing data:', error);
-        process.exit(1);
+    } finally {
+        await mongoose.connection.close();
+        console.log('MongoDB connection closed');
+        process.exit();
     }
 };
 
