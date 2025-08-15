@@ -185,33 +185,130 @@ app.get('/api/user/budget', async (req, res) => {
 let currentPlayer = null;
 let currentBid = null;
 let auctionActive = false;
-let players = [];
-let currentPlayerIndex = -1;
+let players = []; // Available players for auction
+let allPlayersSorted = []; // All players sorted by cost (for replenishing pool)
+let wonPlayerIds = new Set(); // Track players that have been won
 let allBids = []; // New array to store all bids for the current auction
 
+// Function to get all won players from database
+const getWonPlayers = async () => {
+    try {
+        const users = await User.find({}).select('wonPlayers');
+        const wonIds = new Set();
+        users.forEach(user => {
+            if (user.wonPlayers) {
+                user.wonPlayers.forEach(wonPlayer => {
+                    wonIds.add(wonPlayer.player.toString());
+                });
+            }
+        });
+        return wonIds;
+    } catch (error) {
+        console.error('Error getting won players:', error);
+        return new Set();
+    }
+};
+
+// Function to replenish the auction pool
+const replenishPlayerPool = async () => {
+    try {
+        // Update our won players set
+        wonPlayerIds = await getWonPlayers();
+        
+        // Get currently used player IDs from the existing pool
+        const currentPoolIds = new Set(players.map(p => p._id ? p._id.toString() : '').filter(id => id));
+        
+        // Filter out won players and already-pooled players from the sorted list
+        const availablePlayers = allPlayersSorted.filter(player => {
+            // Skip players without _id (corrupted data)
+            if (!player._id) {
+                console.warn('Player found without _id:', player);
+                return false;
+            }
+            
+            const playerId = player._id.toString();
+            return !wonPlayerIds.has(playerId) && !currentPoolIds.has(playerId);
+        });
+        
+        // Take next 20 highest available players and shuffle them
+        const nextPlayers = availablePlayers.slice(0, 20);
+        
+        // Shuffle the new players
+        for (let i = nextPlayers.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [nextPlayers[i], nextPlayers[j]] = [nextPlayers[j], nextPlayers[i]];
+        }
+        
+        // Add to existing player pool
+        players.push(...nextPlayers);
+        
+        console.log(`Added ${nextPlayers.length} new players to auction pool`);
+        console.log(`Total available players: ${availablePlayers.length}`);
+        console.log(`Current auction pool size: ${players.length}`);
+        if (nextPlayers.length > 0) {
+            const minCost = nextPlayers.reduce((min, p) => Math.min(min, p.now_cost || 0), Infinity);
+            const maxCost = nextPlayers.reduce((max, p) => Math.max(max, p.now_cost || 0), 0);
+            console.log(`Replenished players cost range: £${minCost / 10}m to £${maxCost / 10}m`);
+        }
+        
+        return nextPlayers.length > 0;
+    } catch (error) {
+        console.error('Error replenishing player pool:', error);
+        return false;
+    }
+};
+
 // Function to get the next player
-const getNextPlayer = () => {
+const getNextPlayer = async () => {
+    // Remove the current player if it exists (they were just auctioned)
+    if (currentPlayer && currentPlayer._id) {
+        players = players.filter(p => p._id && p._id.toString() !== currentPlayer._id.toString());
+    }
+    
+    // If we're running low on players, replenish the pool
+    if (players.length < 5) {
+        console.log('Running low on players, replenishing pool...');
+        await replenishPlayerPool();
+    }
+    
     if (players.length === 0) {
         console.log('No players available');
         return null;
     }
-    currentPlayerIndex = (currentPlayerIndex + 1) % players.length;
-    return players[currentPlayerIndex];
+    
+    // Get the next player from the pool
+    return players[0];
 };
 
-// Replace the existing loadPlayers function with this:
+// Load and sort all players initially
 const loadPlayers = async () => {
     try {
-        players = await Player.find();
-        // Shuffle the players array
-        for (let i = players.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [players[i], players[j]] = [players[j], players[i]];
+        // Fetch all players from database
+        const allPlayers = await Player.find();
+        
+        // Sort players by now_cost in descending order (highest cost first)
+        allPlayersSorted = allPlayers.sort((a, b) => {
+            const costA = a.now_cost || 0;
+            const costB = b.now_cost || 0;
+            return costB - costA;
+        });
+        
+        // Get currently won players
+        wonPlayerIds = await getWonPlayers();
+        
+        // Initial pool of top available players
+        await replenishPlayerPool();
+        
+        console.log(`Loaded ${allPlayersSorted.length} total players`);
+        console.log(`${wonPlayerIds.size} players already won`);
+        console.log(`Initial auction pool: ${players.length} players`);
+        if (players.length > 0) {
+            console.log(`Auction players range from £${(players[0]?.now_cost || 0) / 10}m to £${(players[players.length - 1]?.now_cost || 0) / 10}m`);
         }
-        console.log(`Loaded and shuffled ${players.length} players`);
     } catch (error) {
         console.error('Error loading players:', error);
         players = [];
+        allPlayersSorted = [];
     }
 };
 
@@ -245,22 +342,28 @@ io.on('connection', async (socket) => {
         // Send current auction state to newly connected client
         socket.emit('auctionState', { currentPlayer, currentBid, auctionActive, allBids });
 
-        socket.on('startAuction', () => {
+        socket.on('startAuction', async () => {
             console.log('Received startAuction event');
             if (!socket.isAdmin) {
                 console.log('Unauthorized attempt to start auction');
                 return socket.emit('error', { message: 'Unauthorized' });
             }
-            currentPlayer = getNextPlayer();
-            if (!currentPlayer) {
-                console.log('No players available for auction');
-                return socket.emit('error', { message: 'No players available for auction' });
+            
+            try {
+                currentPlayer = await getNextPlayer();
+                if (!currentPlayer) {
+                    console.log('No players available for auction');
+                    return socket.emit('error', { message: 'No players available for auction' });
+                }
+                currentBid = null;
+                auctionActive = true;
+                allBids = []; // Reset all bids for the new auction
+                io.emit('auctionStarted', { player: currentPlayer, currentBid, allBids });
+                console.log('Auction started for player:', currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name);
+            } catch (error) {
+                console.error('Error starting auction:', error);
+                socket.emit('error', { message: 'Error starting auction' });
             }
-            currentBid = null;
-            auctionActive = true;
-            allBids = []; // Reset all bids for the new auction
-            io.emit('auctionStarted', { player: currentPlayer, currentBid, allBids });
-            console.log('Auction started for player:', currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name);
         });
 
         socket.on('stopAuction', async () => {
@@ -318,6 +421,34 @@ io.on('connection', async (socket) => {
                         await session.commitTransaction();
                         console.log('Database update successful. Updated user:', JSON.stringify(winner.toObject(), null, 2));
                         console.log('New calculated budget:', newBudgetInMillions);
+                        
+                        // Immediately update in-memory pool to prevent the same player from appearing again
+                        // This happens here because currentPlayer is still defined (before reset at end)
+                        const wonIdStr = currentPlayer?._id?.toString();
+                        if (wonIdStr) {
+                            console.log(`Won player: ${currentPlayer.web_name || currentPlayer.name} (${wonIdStr})`);
+                            if (!wonPlayerIds) wonPlayerIds = new Set();
+                            wonPlayerIds.add(wonIdStr);
+                            const before = players.length;
+                            players = players.filter(p => p && p._id && p._id.toString() !== wonIdStr);
+                            const after = players.length;
+                            console.log(`Removed won player from pool. Size: ${before} -> ${after}`);
+                            
+                            // Also remove from allPlayersSorted for defensive programming
+                            allPlayersSorted = allPlayersSorted.filter(p => p && p._id && p._id.toString() !== wonIdStr);
+                            
+                            // Replenish pool if needed
+                            try {
+                                if (typeof replenishPlayerPool === 'function' && players.length < 5) {
+                                    console.log('Replenishing player pool after win...');
+                                    await replenishPlayerPool();
+                                    console.log(`Pool replenished. New size: ${players.length}`);
+                                }
+                            } catch (e) {
+                                console.error('Error replenishing pool after win:', e);
+                            }
+                        }
+                        
                         io.emit('auctionStopped', {
                             winner: currentBid.bidder,
                             amount: currentBid.amount,
