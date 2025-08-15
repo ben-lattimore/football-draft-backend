@@ -110,6 +110,53 @@ app.get('/api/players', async (req, res) => {
     }
 });
 
+// Search for players (available for auction)
+app.get('/api/players/search', async (req, res) => {
+    try {
+        const { q } = req.query;
+        
+        if (!q || q.length < 2) {
+            return res.status(400).json({ message: 'Search query must be at least 2 characters long' });
+        }
+        
+        // Get currently won player IDs
+        let currentWonPlayerIds;
+        try {
+            currentWonPlayerIds = await getWonPlayers();
+        } catch (error) {
+            console.warn('Error getting won players, using empty set:', error);
+            currentWonPlayerIds = new Set();
+        }
+        
+        // Search for players by name (case insensitive)
+        const searchRegex = new RegExp(q, 'i');
+        const searchResults = await Player.find({
+            $or: [
+                { web_name: searchRegex },
+                { first_name: searchRegex },
+                { second_name: searchRegex },
+                { 'search_fields.full_name': searchRegex }
+            ]
+        }).select('_id web_name first_name second_name position team_name team_short_name now_cost total_points photo_url')
+          .limit(20); // Limit to 20 results
+        
+        // Filter out already won players
+        const availablePlayers = searchResults.filter(player => {
+            if (!player._id) return false;
+            return !currentWonPlayerIds.has(player._id.toString());
+        });
+        
+        res.json({
+            query: q,
+            results: availablePlayers,
+            total: availablePlayers.length
+        });
+    } catch (error) {
+        console.error('Error searching players:', error);
+        res.status(500).json({ message: 'Error searching players', error: error.message });
+    }
+});
+
 app.get('/api/teams', async (req, res) => {
     try {
         const teams = await User.find({})
@@ -189,6 +236,7 @@ let players = []; // Available players for auction
 let allPlayersSorted = []; // All players sorted by cost (for replenishing pool)
 let wonPlayerIds = new Set(); // Track players that have been won
 let allBids = []; // New array to store all bids for the current auction
+let selectedAuctionPlayer = null; // Manually selected player for next auction
 
 // Function to get all won players from database
 const getWonPlayers = async () => {
@@ -260,6 +308,21 @@ const replenishPlayerPool = async () => {
 
 // Function to get the next player
 const getNextPlayer = async () => {
+    // If admin has selected a specific player, use that first
+    if (selectedAuctionPlayer) {
+        // Validate the selected player is still available (not won)
+        wonPlayerIds = await getWonPlayers();
+        if (!wonPlayerIds.has(selectedAuctionPlayer._id.toString())) {
+            console.log(`Using admin-selected player: ${selectedAuctionPlayer.web_name || selectedAuctionPlayer.name}`);
+            const player = selectedAuctionPlayer;
+            selectedAuctionPlayer = null; // Clear selection after use
+            return player;
+        } else {
+            console.log(`Admin-selected player ${selectedAuctionPlayer.web_name || selectedAuctionPlayer.name} has been won, falling back to normal selection`);
+            selectedAuctionPlayer = null; // Clear invalid selection
+        }
+    }
+    
     // Remove the current player if it exists (they were just auctioned)
     if (currentPlayer && currentPlayer._id) {
         players = players.filter(p => p._id && p._id.toString() !== currentPlayer._id.toString());
@@ -519,6 +582,61 @@ io.on('connection', async (socket) => {
             } catch (error) {
                 console.error('Error processing bid:', error);
                 socket.emit('error', { message: 'An error occurred while processing your bid' });
+            }
+        });
+
+        socket.on('setAuctionPlayer', async (data) => {
+            console.log('Received setAuctionPlayer event', data);
+            if (!socket.isAdmin) {
+                console.log('Unauthorized attempt to set auction player');
+                return socket.emit('error', { message: 'Unauthorized: Only admins can set auction players' });
+            }
+
+            if (auctionActive) {
+                console.log('Cannot set auction player while auction is active');
+                return socket.emit('error', { message: 'Cannot set auction player while an auction is active' });
+            }
+
+            try {
+                const { playerId } = data;
+                if (!playerId) {
+                    return socket.emit('error', { message: 'Player ID is required' });
+                }
+
+                // Find the player in the database
+                const player = await Player.findById(playerId);
+                if (!player) {
+                    return socket.emit('error', { message: 'Player not found' });
+                }
+
+                // Check if player has already been won
+                wonPlayerIds = await getWonPlayers();
+                if (wonPlayerIds.has(playerId)) {
+                    return socket.emit('error', { message: 'This player has already been won by someone else' });
+                }
+
+                // Set the selected player for the next auction
+                selectedAuctionPlayer = player;
+                console.log(`Admin selected player for next auction: ${player.web_name || player.name} (${playerId})`);
+                
+                // Notify the admin that the player has been selected
+                socket.emit('auctionPlayerSet', {
+                    player: {
+                        _id: player._id,
+                        web_name: player.web_name,
+                        first_name: player.first_name,
+                        second_name: player.second_name,
+                        position: player.position,
+                        team_name: player.team_name,
+                        now_cost: player.now_cost,
+                        photo_url: player.photo_url
+                    },
+                    message: `${player.web_name || player.name} has been selected for the next auction`
+                });
+                
+            } catch (error) {
+                console.error('Error setting auction player:', error);
+                socket.emit('error', { message: 'Error setting auction player: ' + error.message });
             }
         });
 
