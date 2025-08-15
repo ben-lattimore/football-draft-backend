@@ -284,28 +284,48 @@ io.on('connection', async (socket) => {
                             throw new Error('Winner not found');
                         }
 
+                        // Update legacy wonPlayers for backward compatibility
                         winner.wonPlayers.push({
                             player: currentPlayer._id,
                             amount: currentBid.amount,
                             auctionDate: new Date()
                         });
 
+                        // Update new budget fields
+                        const bidAmountInPence = currentBid.amount * 1000000; // Convert from millions to pence
+                        winner.budget_remaining -= bidAmountInPence;
+                        winner.budget_spent += bidAmountInPence;
+
+                        // Add player to appropriate team composition based on position
+                        const playerPosition = currentPlayer.position;
+                        if (playerPosition === 'GK') {
+                            winner.team_composition.goalkeepers.push(currentPlayer._id);
+                        } else if (playerPosition === 'DEF') {
+                            winner.team_composition.defenders.push(currentPlayer._id);
+                        } else if (playerPosition === 'MID') {
+                            winner.team_composition.midfielders.push(currentPlayer._id);
+                        } else if (playerPosition === 'FWD') {
+                            winner.team_composition.forwards.push(currentPlayer._id);
+                        }
+
                         await winner.save();
 
+                        // Calculate budget for response (both new and legacy)
+                        const newBudgetInMillions = winner.budget_remaining / 1000000; // Convert back to millions
                         const totalSpent = winner.wonPlayers.reduce((total, player) => total + player.amount, 0);
-                        const newBudget = Math.max(winner.initialBudget - totalSpent, 0);
+                        const legacyBudget = Math.max(winner.initialBudget - totalSpent, 0);
 
                         await session.commitTransaction();
                         console.log('Database update successful. Updated user:', JSON.stringify(winner.toObject(), null, 2));
-                        console.log('New calculated budget:', newBudget);
+                        console.log('New calculated budget:', newBudgetInMillions);
                         io.emit('auctionStopped', {
                             winner: currentBid.bidder,
                             amount: currentBid.amount,
                             player: currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name,
-                            newBudget: newBudget,
+                            newBudget: newBudgetInMillions,
                             allBids: allBids
                         });
-                        console.log(`Auction stopped. Winner: ${currentBid.bidder}, Player: ${currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name}, Amount: ${currentBid.amount}, New Budget: ${newBudget}`);
+                        console.log(`Auction stopped. Winner: ${currentBid.bidder}, Player: ${currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name}, Amount: ${currentBid.amount}, New Budget: ${newBudgetInMillions}`);
                     } catch (error) {
                         console.error('Error in transaction, aborting:', error);
                         await session.abortTransaction();
@@ -340,8 +360,16 @@ io.on('connection', async (socket) => {
                     return socket.emit('error', { message: 'User not found' });
                 }
 
-                const totalSpent = user.wonPlayers.reduce((total, player) => total + player.amount, 0);
-                const currentBudget = Math.max(user.initialBudget - totalSpent, 0);
+                // Calculate current budget using new system, fall back to legacy
+                let currentBudget;
+                if (user.budget_remaining !== undefined) {
+                    // New system: budget in pence, convert to millions for comparison
+                    currentBudget = user.budget_remaining / 1000000;
+                } else {
+                    // Legacy system: calculate from wonPlayers
+                    const totalSpent = user.wonPlayers.reduce((total, player) => total + player.amount, 0);
+                    currentBudget = Math.max(user.initialBudget - totalSpent, 0);
+                }
 
                 console.log('User budget:', currentBudget, 'Bid amount:', bid.amount);
                 if (bid.amount > currentBudget) {
