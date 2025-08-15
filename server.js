@@ -1097,6 +1097,75 @@ io.on('connection', async (socket) => {
             }
         });
 
+        socket.on('setRandomAuctionPlayer', async () => {
+            console.log('Received setRandomAuctionPlayer event');
+            if (!socket.isAdmin) {
+                console.log('Unauthorized attempt to set random auction player');
+                return socket.emit('error', { message: 'Unauthorized: Only admins can set random auction players' });
+            }
+
+            if (auctionActive) {
+                console.log('Cannot set random auction player while auction is active');
+                return socket.emit('error', { message: 'Cannot set random auction player while an auction is active' });
+            }
+
+            try {
+                // Get currently won player IDs
+                wonPlayerIds = await getWonPlayers();
+                
+                // Get all available players (any position), filtered by availability
+                const availablePlayers = await Player.find({
+                    _id: { $nin: Array.from(wonPlayerIds) }
+                })
+                .select('_id web_name first_name second_name position team_name team_short_name now_cost total_points photo_url');
+                
+                if (availablePlayers.length === 0) {
+                    return socket.emit('error', { 
+                        message: 'No available players found for random selection'
+                    });
+                }
+                
+                // Select a completely random player from all available players
+                const randomIndex = Math.floor(Math.random() * availablePlayers.length);
+                const randomPlayer = availablePlayers[randomIndex];
+                
+                // Set the random player for the next auction
+                selectedAuctionPlayer = randomPlayer;
+                console.log(`Admin selected random banter player: ${randomPlayer.web_name || randomPlayer.name} from ${availablePlayers.length} total available`);
+                
+                // Format position name for display
+                const positionNames = {
+                    'GK': 'Goalkeeper',
+                    'DEF': 'Defender',
+                    'MID': 'Midfielder',
+                    'FWD': 'Forward'
+                };
+                const positionName = positionNames[randomPlayer.position] || randomPlayer.position;
+                
+                // Notify the admin that the random player has been selected
+                socket.emit('auctionPlayerSet', {
+                    player: {
+                        _id: randomPlayer._id,
+                        web_name: randomPlayer.web_name,
+                        first_name: randomPlayer.first_name,
+                        second_name: randomPlayer.second_name,
+                        position: randomPlayer.position,
+                        team_name: randomPlayer.team_name,
+                        now_cost: randomPlayer.now_cost,
+                        photo_url: randomPlayer.photo_url
+                    },
+                    message: `Banter Pick: ${randomPlayer.web_name || randomPlayer.name} (${positionName}) selected for auction (from ${availablePlayers.length} total available)`,
+                    isRandom: true,
+                    isBanter: true,
+                    totalAvailable: availablePlayers.length
+                });
+                
+            } catch (error) {
+                console.error('Error setting random auction player:', error);
+                socket.emit('error', { message: 'Error setting random auction player: ' + error.message });
+            }
+        });
+
         socket.on('disconnect', (reason) => {
             console.log(`Client disconnected. ID: ${socket.id}, Reason: ${reason}`);
         });
