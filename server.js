@@ -157,19 +157,385 @@ app.get('/api/players/search', async (req, res) => {
     }
 });
 
-app.get('/api/teams', async (req, res) => {
+// Get a random high-value player (from top 50 available)
+app.get('/api/players/random', async (req, res) => {
     try {
-        const teams = await User.find({})
-            .select('-password')
+        // Get currently won player IDs
+        let currentWonPlayerIds;
+        try {
+            currentWonPlayerIds = await getWonPlayers();
+        } catch (error) {
+            console.warn('Error getting won players, using empty set:', error);
+            currentWonPlayerIds = new Set();
+        }
+        
+        // Get all players sorted by cost (highest first) and filter out won players
+        const availablePlayers = await Player.find({
+            _id: { $nin: Array.from(currentWonPlayerIds) }
+        })
+        .sort({ now_cost: -1 }) // Highest cost first
+        .limit(50) // Top 50 highest value
+        .select('_id web_name first_name second_name position team_name team_short_name now_cost total_points photo_url');
+        
+        if (availablePlayers.length === 0) {
+            return res.status(404).json({ message: 'No available high-value players found' });
+        }
+        
+        // Select a random player from the top 50
+        const randomIndex = Math.floor(Math.random() * availablePlayers.length);
+        const randomPlayer = availablePlayers[randomIndex];
+        
+        console.log(`Selected random player: ${randomPlayer.web_name || randomPlayer.first_name + ' ' + randomPlayer.second_name} from ${availablePlayers.length} top available players`);
+        
+        res.json({
+            player: randomPlayer,
+            totalAvailable: availablePlayers.length,
+            selectedFrom: 'Top 50 highest value available players'
+        });
+    } catch (error) {
+        console.error('Error getting random player:', error);
+        res.status(500).json({ message: 'Error getting random player', error: error.message });
+    }
+});
+
+// Get a random player from top 10 highest value by position
+app.get('/api/players/random/:position', async (req, res) => {
+    try {
+        const { position } = req.params;
+        
+        // Validate position parameter
+        const validPositions = ['GK', 'DEF', 'MID', 'FWD'];
+        if (!validPositions.includes(position.toUpperCase())) {
+            return res.status(400).json({ message: 'Invalid position. Must be one of: GK, DEF, MID, FWD' });
+        }
+        
+        // Get currently won player IDs
+        let currentWonPlayerIds;
+        try {
+            currentWonPlayerIds = await getWonPlayers();
+        } catch (error) {
+            console.warn('Error getting won players, using empty set:', error);
+            currentWonPlayerIds = new Set();
+        }
+        
+        // Get players by position, filtered by availability, sorted by cost (highest first)
+        const availablePlayers = await Player.find({
+            position: position.toUpperCase(),
+            _id: { $nin: Array.from(currentWonPlayerIds) }
+        })
+        .sort({ now_cost: -1 }) // Highest cost first
+        .limit(10) // Top 10 highest value for this position
+        .select('_id web_name first_name second_name position team_name team_short_name now_cost total_points photo_url');
+        
+        if (availablePlayers.length === 0) {
+            return res.status(404).json({ 
+                message: `No available ${position.toUpperCase()} players found`,
+                position: position.toUpperCase()
+            });
+        }
+        
+        // Select a random player from the top 10 of this position
+        const randomIndex = Math.floor(Math.random() * availablePlayers.length);
+        const randomPlayer = availablePlayers[randomIndex];
+        
+        console.log(`Selected random ${position.toUpperCase()} player: ${randomPlayer.web_name || randomPlayer.first_name + ' ' + randomPlayer.second_name} from top ${availablePlayers.length} available`);
+        
+        res.json({
+            player: randomPlayer,
+            position: position.toUpperCase(),
+            totalAvailableInPosition: availablePlayers.length,
+            selectedFrom: `Top ${availablePlayers.length} highest value available ${position.toUpperCase()} players`
+        });
+    } catch (error) {
+        console.error('Error getting random player by position:', error);
+        res.status(500).json({ message: 'Error getting random player by position', error: error.message });
+    }
+});
+
+// Get players that have been won in auctions
+app.get('/api/players/won', async (req, res) => {
+    try {
+        const users = await User.find({})
             .populate({
                 path: 'wonPlayers.player',
                 model: 'Player',
-                select: 'name position club player_image'
+                select: '_id web_name first_name second_name position team_name team_short_name now_cost total_points photo_url'
+            })
+            .select('username wonPlayers');
+        
+        const wonPlayers = [];
+        users.forEach(user => {
+            if (user.wonPlayers && user.wonPlayers.length > 0) {
+                user.wonPlayers.forEach(wonPlayer => {
+                    if (wonPlayer.player) {
+                        wonPlayers.push({
+                            player: wonPlayer.player,
+                            winner: user.username,
+                            amount: wonPlayer.amount,
+                            auctionDate: wonPlayer.auctionDate
+                        });
+                    }
+                });
+            }
+        });
+        
+        // Sort by auction date (most recent first)
+        wonPlayers.sort((a, b) => new Date(b.auctionDate) - new Date(a.auctionDate));
+        
+        res.json({
+            players: wonPlayers,
+            total: wonPlayers.length
+        });
+    } catch (error) {
+        console.error('Error fetching won players:', error);
+        res.status(500).json({ message: 'Error fetching won players', error: error.message });
+    }
+});
+
+// Get players that have never been put up for auction
+app.get('/api/players/remaining', async (req, res) => {
+    try {
+        // Get all won player IDs
+        const wonPlayerIds = await getWonPlayers();
+        
+        // For now, we'll consider remaining players as those not won and not currently in auction
+        // In a more complete implementation, we'd track auctionedPlayerIds properly
+        const remainingPlayers = await Player.find({
+            _id: { $nin: Array.from(wonPlayerIds) }
+        })
+        .select('_id web_name first_name second_name position team_name team_short_name now_cost total_points photo_url')
+        .sort({ now_cost: -1 }); // Sort by value (highest first)
+        
+        res.json({
+            players: remainingPlayers,
+            total: remainingPlayers.length
+        });
+    } catch (error) {
+        console.error('Error fetching remaining players:', error);
+        res.status(500).json({ message: 'Error fetching remaining players', error: error.message });
+    }
+});
+
+// Get players that were auctioned but received no bids
+app.get('/api/players/not-bid-on', async (req, res) => {
+    try {
+        // For now, return empty array as we need to implement tracking
+        // In the future, this would query noBidPlayerIds set or a database collection
+        const noBidPlayers = [];
+        
+        if (noBidPlayerIds && noBidPlayerIds.size > 0) {
+            const playerIdsArray = Array.from(noBidPlayerIds);
+            const players = await Player.find({
+                _id: { $in: playerIdsArray }
+            })
+            .select('_id web_name first_name second_name position team_name team_short_name now_cost total_points photo_url');
+            
+            noBidPlayers.push(...players);
+        }
+        
+        res.json({
+            players: noBidPlayers,
+            total: noBidPlayers.length
+        });
+    } catch (error) {
+        console.error('Error fetching players with no bids:', error);
+        res.status(500).json({ message: 'Error fetching players with no bids', error: error.message });
+    }
+});
+
+app.get('/api/teams', async (req, res) => {
+    try {
+        const teams = await User.find({})
+            .select('-hashed_password -password')
+            .populate({
+                path: 'wonPlayers.player',
+                model: 'Player',
+                select: '_id web_name first_name second_name position team_name team_short_name now_cost total_points photo_url name player_image club country'
             });
-        res.json(teams);
+        
+        // Calculate budgets and format team data
+        const formattedTeams = teams.map(team => {
+            // Calculate remaining budget using new system, fall back to legacy
+            let remainingBudget;
+            if (team.budget_remaining !== undefined) {
+                // New system: budget in pence, convert to millions
+                remainingBudget = team.budget_remaining / 1000000;
+            } else {
+                // Legacy system: calculate from wonPlayers
+                const totalSpent = team.wonPlayers?.reduce((total, player) => total + player.amount, 0) || 0;
+                remainingBudget = Math.max((team.initialBudget || 100) - totalSpent, 0);
+            }
+            
+            return {
+                _id: team._id,
+                username: team.username,
+                isAdmin: team.isAdmin || team.is_admin,
+                wonPlayers: team.wonPlayers || [],
+                remainingBudget: remainingBudget,
+                totalSpent: team.wonPlayers?.reduce((total, player) => total + player.amount, 0) || 0,
+                playerCount: team.wonPlayers?.length || 0
+            };
+        });
+        
+        res.json(formattedTeams);
     } catch (error) {
         console.error('Error fetching teams:', error);
         res.status(500).json({ message: 'Error fetching teams', error: error.message });
+    }
+});
+
+// Reset auction data endpoints
+app.post('/api/admin/reset-auction', async (req, res) => {
+    try {
+        const token = req.headers.authorization?.split(' ')[1];
+        if (!token) {
+            return res.status(401).json({ message: 'No token provided' });
+        }
+
+        let decoded;
+        try {
+            decoded = jwt.verify(token, process.env.JWT_SECRET);
+        } catch (err) {
+            return res.status(401).json({ message: 'Invalid token' });
+        }
+
+        const user = await User.findById(decoded.userId);
+        if (!user || !(user.isAdmin || user.is_admin)) {
+            return res.status(403).json({ message: 'Admin access required' });
+        }
+
+        console.log('Starting full auction reset...');
+        
+        // Reset all users' auction data
+        const userResetResult = await User.updateMany({}, {
+            $set: {
+                wonPlayers: [],
+                budget_remaining: 100 * 1000000, // 100m in pence
+                budget_spent: 0,
+                'team_composition.goalkeepers': [],
+                'team_composition.defenders': [],
+                'team_composition.midfielders': [],
+                'team_composition.forwards': []
+            }
+        });
+
+        console.log(`Reset auction data for ${userResetResult.modifiedCount} users`);
+        
+        // Clear in-memory auction state
+        currentPlayer = null;
+        currentBid = null;
+        auctionActive = false;
+        allBids = [];
+        selectedAuctionPlayer = null;
+        wonPlayerIds = new Set();
+        auctionedPlayerIds = new Set();
+        noBidPlayerIds = new Set();
+        
+        console.log('Cleared in-memory auction state');
+        
+        res.json({ 
+            message: 'Auction reset successfully',
+            usersReset: userResetResult.modifiedCount,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('Error resetting auction:', error);
+        res.status(500).json({ message: 'Error resetting auction', error: error.message });
+    }
+});
+
+app.post('/api/admin/reset-budgets-only', async (req, res) => {
+    try {
+        const token = req.headers.authorization?.split(' ')[1];
+        if (!token) {
+            return res.status(401).json({ message: 'No token provided' });
+        }
+
+        let decoded;
+        try {
+            decoded = jwt.verify(token, process.env.JWT_SECRET);
+        } catch (err) {
+            return res.status(401).json({ message: 'Invalid token' });
+        }
+
+        const user = await User.findById(decoded.userId);
+        if (!user || !(user.isAdmin || user.is_admin)) {
+            return res.status(403).json({ message: 'Admin access required' });
+        }
+
+        console.log('Resetting user budgets only...');
+        
+        // Reset only budgets, keep wonPlayers
+        const budgetResetResult = await User.updateMany({}, {
+            $set: {
+                budget_remaining: 100 * 1000000, // 100m in pence
+                budget_spent: 0
+            }
+        });
+
+        console.log(`Reset budgets for ${budgetResetResult.modifiedCount} users`);
+        
+        res.json({ 
+            message: 'User budgets reset to £100m successfully',
+            usersReset: budgetResetResult.modifiedCount,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('Error resetting budgets:', error);
+        res.status(500).json({ message: 'Error resetting budgets', error: error.message });
+    }
+});
+
+app.post('/api/admin/clear-won-players', async (req, res) => {
+    try {
+        const token = req.headers.authorization?.split(' ')[1];
+        if (!token) {
+            return res.status(401).json({ message: 'No token provided' });
+        }
+
+        let decoded;
+        try {
+            decoded = jwt.verify(token, process.env.JWT_SECRET);
+        } catch (err) {
+            return res.status(401).json({ message: 'Invalid token' });
+        }
+
+        const user = await User.findById(decoded.userId);
+        if (!user || !(user.isAdmin || user.is_admin)) {
+            return res.status(403).json({ message: 'Admin access required' });
+        }
+
+        console.log('Clearing won players only...');
+        
+        // Clear only won players and team composition, keep budgets
+        const clearResult = await User.updateMany({}, {
+            $set: {
+                wonPlayers: [],
+                'team_composition.goalkeepers': [],
+                'team_composition.defenders': [],
+                'team_composition.midfielders': [],
+                'team_composition.forwards': []
+            }
+        });
+
+        // Clear in-memory tracking
+        wonPlayerIds = new Set();
+        auctionedPlayerIds = new Set();
+        noBidPlayerIds = new Set();
+
+        console.log(`Cleared won players for ${clearResult.modifiedCount} users`);
+        
+        res.json({ 
+            message: 'Won players cleared successfully',
+            usersReset: clearResult.modifiedCount,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('Error clearing won players:', error);
+        res.status(500).json({ message: 'Error clearing won players', error: error.message });
     }
 });
 
@@ -237,6 +603,8 @@ let allPlayersSorted = []; // All players sorted by cost (for replenishing pool)
 let wonPlayerIds = new Set(); // Track players that have been won
 let allBids = []; // New array to store all bids for the current auction
 let selectedAuctionPlayer = null; // Manually selected player for next auction
+let auctionedPlayerIds = new Set(); // Track players that have been put up for auction
+let noBidPlayerIds = new Set(); // Track players that were auctioned but received no bids
 
 // Function to get all won players from database
 const getWonPlayers = async () => {
@@ -533,6 +901,14 @@ io.on('connection', async (socket) => {
                 }
             } else {
                 console.log('Auction stopped with no winner.');
+                
+                // Track player that was auctioned but received no bids
+                if (currentPlayer && currentPlayer._id) {
+                    const playerId = currentPlayer._id.toString();
+                    noBidPlayerIds.add(playerId);
+                    console.log(`Added player ${currentPlayer.web_name || currentPlayer.name} to no-bid list`);
+                }
+                
                 io.emit('auctionStopped', { winner: null, amount: null, player: currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name, allBids: allBids });
             }
             currentPlayer = null;
@@ -637,6 +1013,87 @@ io.on('connection', async (socket) => {
             } catch (error) {
                 console.error('Error setting auction player:', error);
                 socket.emit('error', { message: 'Error setting auction player: ' + error.message });
+            }
+        });
+
+        socket.on('setRandomAuctionPlayerByPosition', async (data) => {
+            console.log('Received setRandomAuctionPlayerByPosition event', data);
+            if (!socket.isAdmin) {
+                console.log('Unauthorized attempt to set random auction player by position');
+                return socket.emit('error', { message: 'Unauthorized: Only admins can set random auction players' });
+            }
+
+            if (auctionActive) {
+                console.log('Cannot set random auction player while auction is active');
+                return socket.emit('error', { message: 'Cannot set random auction player while an auction is active' });
+            }
+
+            try {
+                const { position } = data;
+                
+                // Validate position parameter
+                const validPositions = ['GK', 'DEF', 'MID', 'FWD'];
+                if (!position || !validPositions.includes(position.toUpperCase())) {
+                    return socket.emit('error', { message: 'Invalid position. Must be one of: GK, DEF, MID, FWD' });
+                }
+                
+                // Get currently won player IDs
+                wonPlayerIds = await getWonPlayers();
+                
+                // Get players by position, filtered by availability, sorted by cost (highest first)
+                const availablePlayers = await Player.find({
+                    position: position.toUpperCase(),
+                    _id: { $nin: Array.from(wonPlayerIds) }
+                })
+                .sort({ now_cost: -1 }) // Highest cost first
+                .limit(10) // Top 10 highest value for this position
+                .select('_id web_name first_name second_name position team_name team_short_name now_cost total_points photo_url');
+                
+                if (availablePlayers.length === 0) {
+                    return socket.emit('error', { 
+                        message: `No available ${position.toUpperCase()} players found for random selection`,
+                        position: position.toUpperCase()
+                    });
+                }
+                
+                // Select a random player from the top 10 of this position
+                const randomIndex = Math.floor(Math.random() * availablePlayers.length);
+                const randomPlayer = availablePlayers[randomIndex];
+                
+                // Set the random player for the next auction
+                selectedAuctionPlayer = randomPlayer;
+                console.log(`Admin selected random ${position.toUpperCase()} player: ${randomPlayer.web_name || randomPlayer.name} from top ${availablePlayers.length} available`);
+                
+                // Format position name for display
+                const positionNames = {
+                    'GK': 'Goalkeeper',
+                    'DEF': 'Defender',
+                    'MID': 'Midfielder',
+                    'FWD': 'Forward'
+                };
+                const positionName = positionNames[position.toUpperCase()] || position.toUpperCase();
+                
+                // Notify the admin that the random player has been selected
+                socket.emit('auctionPlayerSet', {
+                    player: {
+                        _id: randomPlayer._id,
+                        web_name: randomPlayer.web_name,
+                        first_name: randomPlayer.first_name,
+                        second_name: randomPlayer.second_name,
+                        position: randomPlayer.position,
+                        team_name: randomPlayer.team_name,
+                        now_cost: randomPlayer.now_cost,
+                        photo_url: randomPlayer.photo_url
+                    },
+                    message: `Random ${positionName}: ${randomPlayer.web_name || randomPlayer.name} (from top ${availablePlayers.length} available) selected for auction`,
+                    isRandom: true,
+                    position: position.toUpperCase(),
+                    totalAvailableInPosition: availablePlayers.length
+                });
+                
+            } catch (error) {
+                console.error('Error setting random auction player by position:', error);
+                socket.emit('error', { message: 'Error setting random auction player by position: ' + error.message });
             }
         });
 
