@@ -220,6 +220,173 @@ const authenticateAdmin = async (req, res, next) => {
 
 // User Management API Endpoints
 
+// Player Management API Endpoints
+
+// Get all players (Admin only) with optional filters
+app.get('/api/admin/players', authenticateAdmin, async (req, res) => {
+    try {
+        const { search, position } = req.query;
+        let query = {};
+
+        // Apply filters if provided
+        if (search) {
+            const searchRegex = new RegExp(search, 'i');
+            query.$or = [
+                { web_name: searchRegex },
+                { first_name: searchRegex },
+                { second_name: searchRegex },
+                { team_name: searchRegex }
+            ];
+        }
+
+        if (position) {
+            query.position = position.toUpperCase();
+        }
+
+        const players = await Player.find(query)
+            .sort({ web_name: 1 })
+            .select('_id web_name first_name second_name position team_name team_short_name now_cost photo_url');
+
+        res.json(players);
+    } catch (error) {
+        console.error('Error fetching players for admin:', error);
+        res.status(500).json({ message: 'Error fetching players', error: error.message });
+    }
+});
+
+// Create new player (Admin only)
+app.post('/api/admin/players', authenticateAdmin, async (req, res) => {
+    try {
+        const { web_name, first_name, second_name, position, team_name, team_short_name = '', now_cost = 10 } = req.body;
+
+        // Basic validation
+        if (!web_name || !first_name || !second_name || !position || !team_name) {
+            return res.status(400).json({ message: 'Required fields are missing' });
+        }
+
+        // Generate a unique player_id (using timestamp + random number)
+        const player_id = Date.now() + Math.floor(Math.random() * 1000);
+
+        // Create the new player
+        const player = new Player({
+            player_id,
+            web_name,
+            first_name,
+            second_name,
+            position: position.toUpperCase(),
+            team_name,
+            team_short_name: team_short_name || team_name.substring(0, 3).toUpperCase(),
+            now_cost: parseInt(now_cost) || 10,
+            team_id: 0, // Default value
+            element_type: position === 'GK' ? 1 : position === 'DEF' ? 2 : position === 'MID' ? 3 : 4, // Map position to element_type
+            total_points: 0,
+            // Set other required fields with default values
+            form: "0.0",
+            selected_by_percent: "0.0",
+            minutes: 0
+        });
+
+        await player.save();
+
+        res.status(201).json({
+            message: 'Player created successfully',
+            player: {
+                _id: player._id,
+                web_name: player.web_name,
+                first_name: player.first_name,
+                second_name: player.second_name,
+                position: player.position,
+                team_name: player.team_name
+            }
+        });
+    } catch (error) {
+        console.error('Error creating player:', error);
+        res.status(400).json({ message: 'Error creating player', error: error.message });
+    }
+});
+
+// Update player (Admin only)
+app.put('/api/admin/players/:id', authenticateAdmin, async (req, res) => {
+    try {
+        const { web_name, first_name, second_name, position, team_name } = req.body;
+        const playerId = req.params.id;
+
+        // Basic validation
+        if (!web_name || !first_name || !second_name || !position || !team_name) {
+            return res.status(400).json({ message: 'Required fields are missing' });
+        }
+
+        // Create update object with only the fields we want to update
+        const updateData = {
+            web_name,
+            first_name,
+            second_name,
+            position: position.toUpperCase(),
+            team_name,
+            // Update legacy fields for backwards compatibility
+            name: web_name,
+            club: team_name
+        };
+
+        // Handle team_short_name update
+        if (req.body.team_short_name) {
+            updateData.team_short_name = req.body.team_short_name;
+        } else if (team_name) {
+            // Auto-generate if not provided
+            updateData.team_short_name = team_name.substring(0, 3).toUpperCase();
+        }
+
+        // Update element_type based on position if position changed
+        if (position) {
+            updateData.element_type = position === 'GK' ? 1 : position === 'DEF' ? 2 : position === 'MID' ? 3 : 4;
+        }
+
+        const player = await Player.findByIdAndUpdate(
+            playerId,
+            updateData,
+            { new: true, runValidators: true }
+        ).select('_id web_name first_name second_name position team_name');
+
+        if (!player) {
+            return res.status(404).json({ message: 'Player not found' });
+        }
+
+        res.json({ message: 'Player updated successfully', player });
+    } catch (error) {
+        console.error('Error updating player:', error);
+        res.status(400).json({ message: 'Error updating player', error: error.message });
+    }
+});
+
+// Delete player (Admin only)
+app.delete('/api/admin/players/:id', authenticateAdmin, async (req, res) => {
+    try {
+        const playerId = req.params.id;
+
+        // Check if the player has been won by any user
+        const usersWithPlayer = await User.countDocuments({
+            'wonPlayers.player': playerId
+        });
+
+        if (usersWithPlayer > 0) {
+            return res.status(400).json({ 
+                message: 'Cannot delete player: This player has been won by one or more users. Remove the player from users first.' 
+            });
+        }
+
+        const player = await Player.findByIdAndDelete(playerId);
+
+        if (!player) {
+            return res.status(404).json({ message: 'Player not found' });
+        }
+
+        res.json({ message: 'Player deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting player:', error);
+        res.status(500).json({ message: 'Error deleting player', error: error.message });
+    }
+});
+
 // Get all users (Admin only)
 app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
     try {
@@ -372,11 +539,14 @@ app.get('/api/players/random/:position', async (req, res) => {
     try {
         const { position } = req.params;
         
-        // Validate position parameter
-        const validPositions = ['GK', 'DEF', 'MID', 'FWD'];
+        // Validate position parameter and normalize GKP to GK
+        const validPositions = ['GK', 'GKP', 'DEF', 'MID', 'FWD'];
         if (!validPositions.includes(position.toUpperCase())) {
-            return res.status(400).json({ message: 'Invalid position. Must be one of: GK, DEF, MID, FWD' });
+            return res.status(400).json({ message: 'Invalid position. Must be one of: GK, GKP, DEF, MID, FWD' });
         }
+        
+        // Normalize GKP to GK for database query
+        const normalizedPosition = position.toUpperCase() === 'GKP' ? 'GKP' : position.toUpperCase();
         
         // Get currently won player IDs
         let currentWonPlayerIds;
@@ -388,8 +558,10 @@ app.get('/api/players/random/:position', async (req, res) => {
         }
         
         // Get players by position, filtered by availability, sorted by cost (highest first)
+        // Handle GK -> GKP mapping
+        const searchPosition = position.toUpperCase() === 'GK' ? 'GKP' : position.toUpperCase();
         const availablePlayers = await Player.find({
-            position: position.toUpperCase(),
+            position: searchPosition,
             _id: { $nin: Array.from(currentWonPlayerIds) }
         })
         .sort({ now_cost: -1 }) // Highest cost first
@@ -775,6 +947,11 @@ let selectedAuctionPlayer = null; // Manually selected player for next auction
 let auctionedPlayerIds = new Set(); // Track players that have been put up for auction
 let noBidPlayerIds = new Set(); // Track players that were auctioned but received no bids
 
+// Countdown timer state
+let countdownTimer = 10; // Countdown value from 10 to 0
+let countdownInterval = null; // Interval reference for clearing
+let countdownActive = false; // Track if countdown is running
+
 // Function to get all won players from database
 const getWonPlayers = async () => {
     try {
@@ -912,6 +1089,200 @@ const loadPlayers = async () => {
     }
 };
 
+// Countdown helper functions
+const startCountdown = async () => {
+    console.log('Starting countdown timer');
+    
+    // Clear any existing interval to prevent multiple timers
+    if (countdownInterval) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+    }
+    
+    // Initialize countdown state
+    countdownTimer = 10;
+    countdownActive = true;
+    
+    // Emit initial countdown value
+    io.emit('countdownUpdate', { countdown: countdownTimer, active: countdownActive });
+    
+    // Create interval that decrements every second
+    countdownInterval = setInterval(async () => {
+        countdownTimer--;
+        console.log(`Countdown: ${countdownTimer} seconds remaining`);
+        
+        // Emit countdown update to all clients
+        io.emit('countdownUpdate', { countdown: countdownTimer, active: countdownActive });
+        
+        // When countdown reaches 0, auto-stop the auction
+        if (countdownTimer <= 0) {
+            console.log('Countdown reached 0, auto-stopping auction');
+            clearInterval(countdownInterval);
+            countdownInterval = null;
+            countdownActive = false;
+            
+            // Trigger auction stop logic
+            await autoStopAuction();
+        }
+    }, 1000); // Run every second
+};
+
+const resetCountdown = () => {
+    console.log('Resetting countdown timer');
+    
+    // Clear existing interval
+    if (countdownInterval) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+    }
+    
+    // Start new countdown from 10 seconds
+    startCountdown();
+};
+
+const clearCountdown = () => {
+    console.log('Clearing countdown timer');
+    
+    if (countdownInterval) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+    }
+    
+    countdownActive = false;
+    countdownTimer = 10;
+    
+    // Emit final countdown state
+    io.emit('countdownUpdate', { countdown: countdownTimer, active: countdownActive });
+};
+
+// Auto-stop auction function (same logic as manual stop)
+const autoStopAuction = async () => {
+    console.log('Auto-stopping auction due to countdown expiry');
+    auctionActive = false;
+    
+    if (currentBid && currentPlayer) {
+        try {
+            console.log('Auto-stop - Current player:', currentPlayer);
+            console.log('Auto-stop - Current bid:', currentBid);
+            const session = await mongoose.startSession();
+            session.startTransaction();
+            try {
+                const winner = await User.findOne({ username: currentBid.bidder }).session(session);
+
+                if (!winner) {
+                    console.log('Auto-stop - Winner not found in database');
+                    throw new Error('Winner not found');
+                }
+
+                // Update legacy wonPlayers for backward compatibility
+                winner.wonPlayers.push({
+                    player: currentPlayer._id,
+                    amount: currentBid.amount,
+                    auctionDate: new Date()
+                });
+
+                // Update new budget fields
+                const bidAmountInPence = currentBid.amount * 1000000; // Convert from millions to pence
+                winner.budget_remaining -= bidAmountInPence;
+                winner.budget_spent += bidAmountInPence;
+
+                // Add player to appropriate team composition based on position
+                const playerPosition = currentPlayer.position;
+                if (playerPosition === 'GK' || playerPosition === 'GKP') {
+                    winner.team_composition.goalkeepers.push(currentPlayer._id);
+                } else if (playerPosition === 'DEF') {
+                    winner.team_composition.defenders.push(currentPlayer._id);
+                } else if (playerPosition === 'MID') {
+                    winner.team_composition.midfielders.push(currentPlayer._id);
+                } else if (playerPosition === 'FWD') {
+                    winner.team_composition.forwards.push(currentPlayer._id);
+                }
+
+                await winner.save();
+
+                // Calculate budget for response (both new and legacy)
+                const newBudgetInMillions = winner.budget_remaining / 1000000; // Convert back to millions
+                const totalSpent = winner.wonPlayers.reduce((total, player) => total + player.amount, 0);
+                const legacyBudget = Math.max(winner.initialBudget - totalSpent, 0);
+
+                await session.commitTransaction();
+                console.log('Auto-stop - Database update successful. Updated user:', JSON.stringify(winner.toObject(), null, 2));
+                console.log('Auto-stop - New calculated budget:', newBudgetInMillions);
+                
+                // Immediately update in-memory pool to prevent the same player from appearing again
+                const wonIdStr = currentPlayer?._id?.toString();
+                if (wonIdStr) {
+                    console.log(`Auto-stop - Won player: ${currentPlayer.web_name || currentPlayer.name} (${wonIdStr})`);
+                    if (!wonPlayerIds) wonPlayerIds = new Set();
+                    wonPlayerIds.add(wonIdStr);
+                    const before = players.length;
+                    players = players.filter(p => p && p._id && p._id.toString() !== wonIdStr);
+                    const after = players.length;
+                    console.log(`Auto-stop - Removed won player from pool. Size: ${before} -> ${after}`);
+                    
+                    // Also remove from allPlayersSorted for defensive programming
+                    allPlayersSorted = allPlayersSorted.filter(p => p && p._id && p._id.toString() !== wonIdStr);
+                    
+                    // Replenish pool if needed
+                    try {
+                        if (typeof replenishPlayerPool === 'function' && players.length < 5) {
+                            console.log('Auto-stop - Replenishing player pool after win...');
+                            await replenishPlayerPool();
+                            console.log(`Auto-stop - Pool replenished. New size: ${players.length}`);
+                        }
+                    } catch (e) {
+                        console.error('Auto-stop - Error replenishing pool after win:', e);
+                    }
+                }
+                
+                io.emit('auctionStopped', {
+                    winner: currentBid.bidder,
+                    amount: currentBid.amount,
+                    player: currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name,
+                    newBudget: newBudgetInMillions,
+                    allBids: allBids,
+                    autoStopped: true // Flag to indicate this was an auto-stop
+                });
+                console.log(`Auto-stop - Auction stopped. Winner: ${currentBid.bidder}, Player: ${currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name}, Amount: ${currentBid.amount}, New Budget: ${newBudgetInMillions}`);
+            } catch (error) {
+                console.error('Auto-stop - Error in transaction, aborting:', error);
+                await session.abortTransaction();
+                throw error;
+            } finally {
+                session.endSession();
+            }
+        } catch (error) {
+            console.error('Auto-stop - Error saving won player:', error);
+            io.emit('error', { message: 'Error saving auction result: ' + error.message });
+        }
+    } else {
+        console.log('Auto-stop - Auction stopped with no winner.');
+        
+        // Track player that was auctioned but received no bids
+        if (currentPlayer && currentPlayer._id) {
+            const playerId = currentPlayer._id.toString();
+            noBidPlayerIds.add(playerId);
+            console.log(`Auto-stop - Added player ${currentPlayer.web_name || currentPlayer.name} to no-bid list`);
+        }
+        
+        io.emit('auctionStopped', { 
+            winner: null, 
+            amount: null, 
+            player: currentPlayer?.name || currentPlayer?.web_name || currentPlayer?.display_name, 
+            allBids: allBids,
+            autoStopped: true // Flag to indicate this was an auto-stop
+        });
+    }
+    
+    // Reset auction state
+    currentPlayer = null;
+    currentBid = null;
+    allBids = [];
+    
+    // Clear countdown state
+    clearCountdown();
+};
+
 // Socket.IO with authentication
 io.use((socket, next) => {
     const token = socket.handshake.auth.token;
@@ -940,7 +1311,14 @@ io.on('connection', async (socket) => {
         console.log(`User connected: ${user.username}, Admin: ${socket.isAdmin}`);
 
         // Send current auction state to newly connected client
-        socket.emit('auctionState', { currentPlayer, currentBid, auctionActive, allBids });
+        socket.emit('auctionState', { 
+            currentPlayer, 
+            currentBid, 
+            auctionActive, 
+            allBids,
+            countdown: countdownTimer,
+            countdownActive: countdownActive
+        });
 
         socket.on('startAuction', async () => {
             console.log('Received startAuction event');
@@ -958,7 +1336,17 @@ io.on('connection', async (socket) => {
                 currentBid = null;
                 auctionActive = true;
                 allBids = []; // Reset all bids for the new auction
-                io.emit('auctionStarted', { player: currentPlayer, currentBid, allBids });
+                
+                // Start the countdown timer
+                startCountdown();
+                
+                io.emit('auctionStarted', { 
+                    player: currentPlayer, 
+                    currentBid, 
+                    allBids,
+                    countdown: countdownTimer,
+                    countdownActive: countdownActive
+                });
                 console.log('Auction started for player:', currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name);
             } catch (error) {
                 console.error('Error starting auction:', error);
@@ -1001,7 +1389,7 @@ io.on('connection', async (socket) => {
 
                         // Add player to appropriate team composition based on position
                         const playerPosition = currentPlayer.position;
-                        if (playerPosition === 'GK') {
+                        if (playerPosition === 'GK' || playerPosition === 'GKP') {
                             winner.team_composition.goalkeepers.push(currentPlayer._id);
                         } else if (playerPosition === 'DEF') {
                             winner.team_composition.defenders.push(currentPlayer._id);
@@ -1080,6 +1468,10 @@ io.on('connection', async (socket) => {
                 
                 io.emit('auctionStopped', { winner: null, amount: null, player: currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name, allBids: allBids });
             }
+            
+            // Clear countdown state when auction is manually stopped
+            clearCountdown();
+            
             currentPlayer = null;
             currentBid = null;
             allBids = [];
@@ -1120,6 +1512,11 @@ io.on('connection', async (socket) => {
                     allBids.push({ ...bid, timestamp: new Date() }); // Add the new bid to allBids with a timestamp
                     console.log('New bid accepted:', bid);
                     io.emit('newBid', { currentBid: bid, allBids: allBids });
+                    
+                    // Reset countdown timer on new bid
+                    if (auctionActive && countdownActive) {
+                        resetCountdown();
+                    }
                 } else {
                     console.log('Bid rejected: not higher than current bid');
                     socket.emit('error', { message: 'Your bid must be higher than the current bid' });
