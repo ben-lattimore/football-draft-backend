@@ -198,6 +198,175 @@ app.get('/api/players/random', async (req, res) => {
     }
 });
 
+// Admin authentication middleware
+const authenticateAdmin = async (req, res, next) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) {
+        return res.status(401).json({ message: 'No token provided' });
+    }
+    
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await User.findById(decoded.userId);
+        if (!user || (!user.isAdmin && !user.is_admin)) {
+            return res.status(403).json({ message: 'Admin access required' });
+        }
+        req.user = user;
+        next();
+    } catch (error) {
+        return res.status(401).json({ message: 'Invalid token' });
+    }
+};
+
+// User Management API Endpoints
+
+// Get all users (Admin only)
+app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
+    try {
+        const users = await User.find({})
+            .select('-hashed_password -password')
+            .populate('wonPlayers.player', 'web_name position team_name');
+        res.json(users);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching users', error: error.message });
+    }
+});
+
+// Create new user (Admin only)
+app.post('/api/admin/users', authenticateAdmin, async (req, res) => {
+    try {
+        console.log('=== CREATE USER REQUEST ===');
+        console.log('Request body:', req.body);
+        console.log('Admin user:', req.user.username);
+        
+        const { username, password, email, isAdmin } = req.body;
+        
+        // Validation
+        if (!username || !password) {
+            console.log('Validation failed: missing username or password');
+            return res.status(400).json({ message: 'Username and password are required' });
+        }
+        
+        if (password.length < 6) {
+            console.log('Validation failed: password too short');
+            return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+        }
+        
+        // Check if user exists
+        console.log('Checking if user exists:', username);
+        const existingUser = await User.findOne({ username });
+        if (existingUser) {
+            console.log('User already exists:', username);
+            return res.status(400).json({ message: 'Username already exists' });
+        }
+        
+        console.log('Creating new user...');
+        const user = new User({
+            username,
+            email: email || null, // Convert empty string to null
+            hashed_password: password, // Will be hashed by pre-save hook
+            is_admin: isAdmin || false,
+            isAdmin: isAdmin || false // Keep both for compatibility
+        });
+        
+        console.log('Saving user to database...');
+        await user.save();
+        console.log('User saved successfully:', user._id);
+        
+        res.status(201).json({ 
+            message: 'User created successfully',
+            user: { 
+                _id: user._id,
+                username: user.username, 
+                email: user.email,
+                is_admin: user.is_admin,
+                isAdmin: user.isAdmin
+            }
+        });
+    } catch (error) {
+        console.error('Error creating user:', error);
+        res.status(400).json({ message: 'Error creating user', error: error.message });
+    }
+});
+
+// Update user (Admin only)
+app.put('/api/admin/users/:id', authenticateAdmin, async (req, res) => {
+    try {
+        const { username, password, email, isAdmin } = req.body;
+        const userId = req.params.id;
+        
+        // Prevent admin from removing their own admin status
+        if (userId === req.user._id.toString() && isAdmin === false) {
+            return res.status(400).json({ message: 'Cannot remove your own admin privileges' });
+        }
+        
+        const updateData = {};
+        if (username && username.trim()) updateData.username = username.trim();
+        if (email !== undefined) updateData.email = email;
+        if (isAdmin !== undefined) {
+            updateData.is_admin = isAdmin;
+            updateData.isAdmin = isAdmin;
+        }
+        
+        // Handle password update separately
+        if (password && password.trim()) {
+            if (password.length < 6) {
+                return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+            }
+            const hashedPassword = await bcrypt.hash(password, 10);
+            updateData.hashed_password = hashedPassword;
+        }
+        
+        const user = await User.findByIdAndUpdate(
+            userId,
+            updateData,
+            { new: true, runValidators: true }
+        ).select('-hashed_password -password');
+        
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        res.json({ message: 'User updated successfully', user });
+    } catch (error) {
+        if (error.code === 11000) {
+            return res.status(400).json({ message: 'Username already exists' });
+        }
+        res.status(400).json({ message: 'Error updating user', error: error.message });
+    }
+});
+
+// Delete user (Admin only)
+app.delete('/api/admin/users/:id', authenticateAdmin, async (req, res) => {
+    try {
+        const userId = req.params.id;
+        
+        // Prevent admin from deleting themselves
+        if (userId === req.user._id.toString()) {
+            return res.status(400).json({ message: 'Cannot delete your own account' });
+        }
+        
+        // Check if this is the last admin
+        const adminCount = await User.countDocuments({ 
+            $or: [{ is_admin: true }, { isAdmin: true }] 
+        });
+        
+        const userToDelete = await User.findById(userId);
+        if (!userToDelete) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        if ((userToDelete.is_admin || userToDelete.isAdmin) && adminCount <= 1) {
+            return res.status(400).json({ message: 'Cannot delete the last admin user' });
+        }
+        
+        await User.findByIdAndDelete(userId);
+        res.json({ message: 'User deleted successfully' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error deleting user', error: error.message });
+    }
+});
+
 // Get a random player from top 10 highest value by position
 app.get('/api/players/random/:position', async (req, res) => {
     try {
