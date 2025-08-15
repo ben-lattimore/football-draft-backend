@@ -947,10 +947,6 @@ let selectedAuctionPlayer = null; // Manually selected player for next auction
 let auctionedPlayerIds = new Set(); // Track players that have been put up for auction
 let noBidPlayerIds = new Set(); // Track players that were auctioned but received no bids
 
-// Countdown timer state
-let countdownTimer = 10; // Countdown value from 10 to 0
-let countdownInterval = null; // Interval reference for clearing
-let countdownActive = false; // Track if countdown is running
 
 // Function to get all won players from database
 const getWonPlayers = async () => {
@@ -1089,199 +1085,6 @@ const loadPlayers = async () => {
     }
 };
 
-// Countdown helper functions
-const startCountdown = async () => {
-    console.log('Starting countdown timer');
-    
-    // Clear any existing interval to prevent multiple timers
-    if (countdownInterval) {
-        clearInterval(countdownInterval);
-        countdownInterval = null;
-    }
-    
-    // Initialize countdown state
-    countdownTimer = 10;
-    countdownActive = true;
-    
-    // Emit initial countdown value
-    io.emit('countdownUpdate', { countdown: countdownTimer, active: countdownActive });
-    
-    // Create interval that decrements every second
-    countdownInterval = setInterval(async () => {
-        countdownTimer--;
-        console.log(`Countdown: ${countdownTimer} seconds remaining`);
-        
-        // Emit countdown update to all clients
-        io.emit('countdownUpdate', { countdown: countdownTimer, active: countdownActive });
-        
-        // When countdown reaches 0, auto-stop the auction
-        if (countdownTimer <= 0) {
-            console.log('Countdown reached 0, auto-stopping auction');
-            clearInterval(countdownInterval);
-            countdownInterval = null;
-            countdownActive = false;
-            
-            // Trigger auction stop logic
-            await autoStopAuction();
-        }
-    }, 1000); // Run every second
-};
-
-const resetCountdown = () => {
-    console.log('Resetting countdown timer');
-    
-    // Clear existing interval
-    if (countdownInterval) {
-        clearInterval(countdownInterval);
-        countdownInterval = null;
-    }
-    
-    // Start new countdown from 10 seconds
-    startCountdown();
-};
-
-const clearCountdown = () => {
-    console.log('Clearing countdown timer');
-    
-    if (countdownInterval) {
-        clearInterval(countdownInterval);
-        countdownInterval = null;
-    }
-    
-    countdownActive = false;
-    countdownTimer = 10;
-    
-    // Emit final countdown state
-    io.emit('countdownUpdate', { countdown: countdownTimer, active: countdownActive });
-};
-
-// Auto-stop auction function (same logic as manual stop)
-const autoStopAuction = async () => {
-    console.log('Auto-stopping auction due to countdown expiry');
-    auctionActive = false;
-    
-    if (currentBid && currentPlayer) {
-        try {
-            console.log('Auto-stop - Current player:', currentPlayer);
-            console.log('Auto-stop - Current bid:', currentBid);
-            const session = await mongoose.startSession();
-            session.startTransaction();
-            try {
-                const winner = await User.findOne({ username: currentBid.bidder }).session(session);
-
-                if (!winner) {
-                    console.log('Auto-stop - Winner not found in database');
-                    throw new Error('Winner not found');
-                }
-
-                // Update legacy wonPlayers for backward compatibility
-                winner.wonPlayers.push({
-                    player: currentPlayer._id,
-                    amount: currentBid.amount,
-                    auctionDate: new Date()
-                });
-
-                // Update new budget fields
-                const bidAmountInPence = currentBid.amount * 1000000; // Convert from millions to pence
-                winner.budget_remaining -= bidAmountInPence;
-                winner.budget_spent += bidAmountInPence;
-
-                // Add player to appropriate team composition based on position
-                const playerPosition = currentPlayer.position;
-                if (playerPosition === 'GK' || playerPosition === 'GKP') {
-                    winner.team_composition.goalkeepers.push(currentPlayer._id);
-                } else if (playerPosition === 'DEF') {
-                    winner.team_composition.defenders.push(currentPlayer._id);
-                } else if (playerPosition === 'MID') {
-                    winner.team_composition.midfielders.push(currentPlayer._id);
-                } else if (playerPosition === 'FWD') {
-                    winner.team_composition.forwards.push(currentPlayer._id);
-                }
-
-                await winner.save();
-
-                // Calculate budget for response (both new and legacy)
-                const newBudgetInMillions = winner.budget_remaining / 1000000; // Convert back to millions
-                const totalSpent = winner.wonPlayers.reduce((total, player) => total + player.amount, 0);
-                const legacyBudget = Math.max(winner.initialBudget - totalSpent, 0);
-
-                await session.commitTransaction();
-                console.log('Auto-stop - Database update successful. Updated user:', JSON.stringify(winner.toObject(), null, 2));
-                console.log('Auto-stop - New calculated budget:', newBudgetInMillions);
-                
-                // Immediately update in-memory pool to prevent the same player from appearing again
-                const wonIdStr = currentPlayer?._id?.toString();
-                if (wonIdStr) {
-                    console.log(`Auto-stop - Won player: ${currentPlayer.web_name || currentPlayer.name} (${wonIdStr})`);
-                    if (!wonPlayerIds) wonPlayerIds = new Set();
-                    wonPlayerIds.add(wonIdStr);
-                    const before = players.length;
-                    players = players.filter(p => p && p._id && p._id.toString() !== wonIdStr);
-                    const after = players.length;
-                    console.log(`Auto-stop - Removed won player from pool. Size: ${before} -> ${after}`);
-                    
-                    // Also remove from allPlayersSorted for defensive programming
-                    allPlayersSorted = allPlayersSorted.filter(p => p && p._id && p._id.toString() !== wonIdStr);
-                    
-                    // Replenish pool if needed
-                    try {
-                        if (typeof replenishPlayerPool === 'function' && players.length < 5) {
-                            console.log('Auto-stop - Replenishing player pool after win...');
-                            await replenishPlayerPool();
-                            console.log(`Auto-stop - Pool replenished. New size: ${players.length}`);
-                        }
-                    } catch (e) {
-                        console.error('Auto-stop - Error replenishing pool after win:', e);
-                    }
-                }
-                
-                io.emit('auctionStopped', {
-                    winner: currentBid.bidder,
-                    amount: currentBid.amount,
-                    player: currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name,
-                    newBudget: newBudgetInMillions,
-                    allBids: allBids,
-                    autoStopped: true // Flag to indicate this was an auto-stop
-                });
-                console.log(`Auto-stop - Auction stopped. Winner: ${currentBid.bidder}, Player: ${currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name}, Amount: ${currentBid.amount}, New Budget: ${newBudgetInMillions}`);
-            } catch (error) {
-                console.error('Auto-stop - Error in transaction, aborting:', error);
-                await session.abortTransaction();
-                throw error;
-            } finally {
-                session.endSession();
-            }
-        } catch (error) {
-            console.error('Auto-stop - Error saving won player:', error);
-            io.emit('error', { message: 'Error saving auction result: ' + error.message });
-        }
-    } else {
-        console.log('Auto-stop - Auction stopped with no winner.');
-        
-        // Track player that was auctioned but received no bids
-        if (currentPlayer && currentPlayer._id) {
-            const playerId = currentPlayer._id.toString();
-            noBidPlayerIds.add(playerId);
-            console.log(`Auto-stop - Added player ${currentPlayer.web_name || currentPlayer.name} to no-bid list`);
-        }
-        
-        io.emit('auctionStopped', { 
-            winner: null, 
-            amount: null, 
-            player: currentPlayer?.name || currentPlayer?.web_name || currentPlayer?.display_name, 
-            allBids: allBids,
-            autoStopped: true // Flag to indicate this was an auto-stop
-        });
-    }
-    
-    // Reset auction state
-    currentPlayer = null;
-    currentBid = null;
-    allBids = [];
-    
-    // Clear countdown state
-    clearCountdown();
-};
 
 // Socket.IO with authentication
 io.use((socket, next) => {
@@ -1315,9 +1118,7 @@ io.on('connection', async (socket) => {
             currentPlayer, 
             currentBid, 
             auctionActive, 
-            allBids,
-            countdown: countdownTimer,
-            countdownActive: countdownActive
+            allBids
         });
 
         socket.on('startAuction', async () => {
@@ -1337,15 +1138,10 @@ io.on('connection', async (socket) => {
                 auctionActive = true;
                 allBids = []; // Reset all bids for the new auction
                 
-                // Start the countdown timer
-                startCountdown();
-                
                 io.emit('auctionStarted', { 
                     player: currentPlayer, 
                     currentBid, 
-                    allBids,
-                    countdown: countdownTimer,
-                    countdownActive: countdownActive
+                    allBids
                 });
                 console.log('Auction started for player:', currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name);
             } catch (error) {
@@ -1469,9 +1265,6 @@ io.on('connection', async (socket) => {
                 io.emit('auctionStopped', { winner: null, amount: null, player: currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name, allBids: allBids });
             }
             
-            // Clear countdown state when auction is manually stopped
-            clearCountdown();
-            
             currentPlayer = null;
             currentBid = null;
             allBids = [];
@@ -1512,11 +1305,6 @@ io.on('connection', async (socket) => {
                     allBids.push({ ...bid, timestamp: new Date() }); // Add the new bid to allBids with a timestamp
                     console.log('New bid accepted:', bid);
                     io.emit('newBid', { currentBid: bid, allBids: allBids });
-                    
-                    // Reset countdown timer on new bid
-                    if (auctionActive && countdownActive) {
-                        resetCountdown();
-                    }
                 } else {
                     console.log('Bid rejected: not higher than current bid');
                     socket.emit('error', { message: 'Your bid must be higher than the current bid' });
