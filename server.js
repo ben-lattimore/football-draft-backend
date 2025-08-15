@@ -60,42 +60,9 @@ mongoose.connect(process.env.MONGODB_URI, {
     })
     .catch((err) => console.error('Could not connect to MongoDB', err));
 
-// User Model
-const UserSchema = new mongoose.Schema({
-    username: { type: String, required: true, unique: true },
-    password: { type: String, required: true },
-    isAdmin: { type: Boolean, default: false },
-    initialBudget: { type: Number, default: 100 },
-    wonPlayers: [{
-        player: { type: mongoose.Schema.Types.ObjectId, ref: 'Player' },
-        amount: { type: Number, required: true },
-        auctionDate: { type: Date, default: Date.now }
-    }]
-});
-
-UserSchema.pre('save', async function(next) {
-    if (this.isModified('password')) {
-        this.password = await bcrypt.hash(this.password, 10);
-    }
-    next();
-});
-
-UserSchema.methods.comparePassword = async function(candidatePassword) {
-    return bcrypt.compare(candidatePassword, this.password);
-};
-
-const User = mongoose.model('User', UserSchema);
-
-// Player Model
-const PlayerSchema = new mongoose.Schema({
-    name: String,
-    position: String,
-    club: String,
-    player_image: String,
-    inBin: { type: Boolean, default: false }
-});
-
-const Player = mongoose.model('Player', PlayerSchema);
+// Import models
+const User = require('./models/User');
+const Player = require('./models/player');
 
 // Auth Routes
 app.post('/api/auth/register', async (req, res) => {
@@ -125,7 +92,7 @@ app.post('/api/auth/login', async (req, res) => {
             token,
             user: {
                 username: user.username,
-                isAdmin: user.isAdmin
+                isAdmin: user.isAdmin || user.is_admin
             }
         });
     } catch (error) {
@@ -133,20 +100,10 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// New route to get players in the bin
-app.get('/api/players/bin', async (req, res) => {
-    try {
-        const binPlayers = await Player.find({ inBin: true });
-        res.json(binPlayers);
-    } catch (error) {
-        res.status(500).json({ message: 'Error fetching bin players', error: error.message });
-    }
-});
-
-// Update the existing players route to exclude bin players
+// Get all players
 app.get('/api/players', async (req, res) => {
     try {
-        const players = await Player.find({ inBin: false });
+        const players = await Player.find({});
         res.json(players);
     } catch (error) {
         res.status(500).json({ message: 'Error fetching players', error: error.message });
@@ -200,8 +157,16 @@ app.get('/api/user/budget', async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        const totalSpent = user.wonPlayers.reduce((total, player) => total + player.amount, 0);
-        const calculatedBudget = Math.max(user.initialBudget - totalSpent, 0);
+        // Handle both old and new budget systems
+        let calculatedBudget;
+        if (user.budget_remaining !== undefined) {
+            // New schema: budget stored directly
+            calculatedBudget = user.budget_remaining / 1000000; // Convert from pence to millions
+        } else {
+            // Old schema: calculate from wonPlayers
+            const totalSpent = user.wonPlayers?.reduce((total, player) => total + player.amount, 0) || 0;
+            calculatedBudget = Math.max((user.initialBudget || 100) - totalSpent, 0);
+        }
 
         console.log('User details:', user.toObject());
         console.log('Calculated Budget:', calculatedBudget);
@@ -274,8 +239,8 @@ io.on('connection', async (socket) => {
         if (!user) {
             throw new Error('User not found');
         }
-        socket.isAdmin = user.isAdmin;
-        console.log(`User connected: ${user.username}, Admin: ${user.isAdmin}`);
+        socket.isAdmin = user.isAdmin || user.is_admin;
+        console.log(`User connected: ${user.username}, Admin: ${socket.isAdmin}`);
 
         // Send current auction state to newly connected client
         socket.emit('auctionState', { currentPlayer, currentBid, auctionActive, allBids });
@@ -295,7 +260,7 @@ io.on('connection', async (socket) => {
             auctionActive = true;
             allBids = []; // Reset all bids for the new auction
             io.emit('auctionStarted', { player: currentPlayer, currentBid, allBids });
-            console.log('Auction started for player:', currentPlayer.name);
+            console.log('Auction started for player:', currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name);
         });
 
         socket.on('stopAuction', async () => {
@@ -336,11 +301,11 @@ io.on('connection', async (socket) => {
                         io.emit('auctionStopped', {
                             winner: currentBid.bidder,
                             amount: currentBid.amount,
-                            player: currentPlayer.name,
+                            player: currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name,
                             newBudget: newBudget,
                             allBids: allBids
                         });
-                        console.log(`Auction stopped. Winner: ${currentBid.bidder}, Player: ${currentPlayer.name}, Amount: ${currentBid.amount}, New Budget: ${newBudget}`);
+                        console.log(`Auction stopped. Winner: ${currentBid.bidder}, Player: ${currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name}, Amount: ${currentBid.amount}, New Budget: ${newBudget}`);
                     } catch (error) {
                         console.error('Error in transaction, aborting:', error);
                         await session.abortTransaction();
@@ -353,14 +318,8 @@ io.on('connection', async (socket) => {
                     socket.emit('error', { message: 'Error saving auction result: ' + error.message });
                 }
             } else {
-                console.log('Auction stopped with no winner. Moving player to bin.');
-                try {
-                    await Player.findByIdAndUpdate(currentPlayer._id, { inBin: true });
-                    io.emit('auctionStopped', { winner: null, amount: null, player: currentPlayer.name, allBids: allBids, movedToBin: true });
-                } catch (error) {
-                    console.error('Error moving player to bin:', error);
-                    socket.emit('error', { message: 'Error updating player status: ' + error.message });
-                }
+                console.log('Auction stopped with no winner.');
+                io.emit('auctionStopped', { winner: null, amount: null, player: currentPlayer.name || currentPlayer.web_name || currentPlayer.display_name, allBids: allBids });
             }
             currentPlayer = null;
             currentBid = null;
